@@ -1,0 +1,28 @@
+# Core dependencies
+python-dotenv==1.0.0
+requests==2.31.0
+pydantic==2.5.3
+python-dateutil==2.8.2
+
+# Web Framework
+fastapi==0.104.1
+uvicorn==0.24.0
+sse-starlette==1.8.2
+
+# LLM & RAG
+langchain>=0.1.11
+langchain-community>=0.0.20
+openai==1.3.8
+
+# Vector Database & Embeddings
+chromadb>=0.5.0
+# 버전 호환성 수정: sentence-transformers 3.0+ 이상 사용
+sentence-transformers>=3.0.0
+huggingface-hub>=0.21.0
+
+# Notion Integration
+notion-client==2.2.1
+markdown==3.5.1
+
+# Gitea Integration
+GitPython==3.1.40

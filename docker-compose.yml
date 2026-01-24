@@ -1,0 +1,148 @@
+version: "3.8"
+
+services:
+  # vLLM Engine - GPU 최적화 LLM (CUDA 필요)
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: rag-vllm
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data/vllm-models:/root/.cache/huggingface/hub
+    environment:
+      - MODEL_NAME=Qwen/Qwen2.5-Coder-14B
+      - HF_TOKEN=${HF_TOKEN}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: vllm serve Qwen/Qwen2.5-Coder-14B --port 8000 --dtype float16
+    restart: unless-stopped
+    networks:
+      - rag-network
+    profiles:
+      - vllm
+
+  # Ollama - CPU 최적화 LLM (온프레미스, 로컬 전용)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: rag-ollama
+    # ⚠️ 보안: 로컬 호스트만 접근 가능하도록 설정
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ./data/ollama:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+      # 온프레미스 설정: 데이터 로컬 저장, 외부 전송 없음
+      - OLLAMA_KEEP_ALIVE=0
+      - OLLAMA_NUM_PARALLEL=1
+      # 메모리 최적화 (CPU 모드)
+      - OLLAMA_MEMORY_FRACTION=0.8 # 80% 메모리만 사용
+    restart: unless-stopped
+    networks:
+      - rag-network
+    # 모델 자동 다운로드 (더 가벼운 모델 사용)
+    entrypoint: /bin/bash -c "ollama serve & sleep 5 && ollama pull mistral && wait"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    profiles:
+      - ollama
+
+  # ChromaDB - Vector 데이터베이스 (온프레미스)
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: rag-chromadb
+    ports:
+      - "127.0.0.1:8001:8000"
+    volumes:
+      - ./data/chromadb:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
+      - ANONYMIZED_TELEMETRY=FALSE
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  # Sync Worker - Notion/Gitea/GitHub 동기화 (온프레미스)
+  sync-worker:
+    build:
+      context: ./sync-worker
+      dockerfile: Dockerfile
+    container_name: rag-sync-worker
+    environment:
+      - PYTHONPATH=/app/src
+      - NOTION_TOKEN=${NOTION_TOKEN}
+      - NOTION_DATABASE_ID=${NOTION_DATABASE_ID}
+      - GITEA_URL=${GITEA_URL}
+      - GITEA_TOKEN=${GITEA_TOKEN}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - GITHUB_ORGS=${GITHUB_ORGS}
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - SYNC_INTERVAL=${SYNC_INTERVAL:-300}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LLM_BACKEND=${LLM_BACKEND:-auto}
+    depends_on:
+      - chromadb
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  # RAG Inference API Server - FastAPI (온프레미스)
+  rag-api:
+    build:
+      context: ./sync-worker
+      dockerfile: Dockerfile
+    container_name: rag-api-server
+    command: uvicorn src.server:app --host 0.0.0.0 --port 9000
+    ports:
+      - "127.0.0.1:9000:9000"
+    environment:
+      - PYTHONPATH=/app/src
+      - VLLM_API_URL=${VLLM_API_URL:-http://vllm:8000/v1}
+      - OLLAMA_API_URL=${OLLAMA_API_URL:-http://ollama:11434}
+      - LLM_BACKEND=${LLM_BACKEND:-auto}
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - SEARCH_TOP_K=${SEARCH_TOP_K:-5}
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=9000
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  # Open WebUI - RAG 웹 인터페이스 (온프레미스)
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: rag-webui
+    ports:
+      - "3000:8080"
+    volumes:
+      - ./data/open-webui:/app/backend/data
+    environment:
+      - OPENAI_API_BASE_URL=${OPENAI_API_BASE_URL:-http://ollama:11434/api}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-ollama}
+      - WEBUI_AUTH=false
+      - WEBUI_TRUSTED_HEADER_AUTH_ENABLED=false
+    depends_on:
+      - rag-api
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+networks:
+  rag-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

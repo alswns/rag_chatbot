@@ -110,7 +110,7 @@ services:
       - VLLM_API_URL=http://vllm:8000/v1
       # ✅ docker-compose 환경변수 반영
       # - LLM_MODEL_ID=${LLM_MODEL_ID:-casperhansen/deepseek-r1-distill-llama-8b-awq}
-      - LLM_MODEL_ID = DeepSeek-R1-Distill-8B
+      - LLM_MODEL_ID=DeepSeek-R1-Distill-8B
 
       # ChromaDB 설정
       - CHROMA_HOST=chromadb

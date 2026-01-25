@@ -1,5 +1,3 @@
-version: "3.8"
-
 # AWS g5.xlarge Enterprise RAG System
 # Author: Chief Cloud Architect
 # Updated: 2026-01-25
@@ -177,9 +175,9 @@ services:
       # ✅ [Hotfix] 모델 필터 비활성화하여 RAG API 모델 자동 감지
       # ENABLE_MODEL_FILTER=false로 모든 모델을 Open WebUI에서 표시
       - ENABLE_MODEL_FILTER=true
-      - MODEL_FILTER_LIST = DeepSeek-R1-Distill-8B
-      - ENABLE_MODEL_CHANGER = false
-      - SHOW_ADMIN_DETAILS = false
+      - MODEL_FILTER_LIST=DeepSeek-R1-Distill-8B
+      - ENABLE_MODEL_CHANGER=false
+      - SHOW_ADMIN_DETAILS=false
 
       # ✅ [Hotfix] OpenAI API 호환성 강화
       # ENABLE_OLLAMA_API=false로 Local Ollama 비활성화 (RAG API만 사용)

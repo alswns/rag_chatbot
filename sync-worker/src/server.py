@@ -289,7 +289,7 @@ class QuestionAnsweringManager:
             logger.info('📡 vLLM 호출 중...')
             
 
-            logger.info(f'🔢 토큰 계산: 입력약 {int(estimated_input_tokens)} + 출력 {safe_max_tokens} <= {MODEL_CONTEXT_LIMIT}')
+            
             response = vllm_client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=messages,

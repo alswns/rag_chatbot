@@ -78,11 +78,16 @@ class SyncWorker:
                 logger.warning('⚠ Notion API 연결 실패 - 동기화 시 오류 가능')
             
             # Gitea 커넥터
-            self.gitea_connector = GiteaConnector(
-                gitea_url=self.gitea_url,
-                token=self.gitea_token
-            )
-            logger.info(f'✓ GiteaConnector 초기화 완료 (대상 저장소: {len(self.target_repos)}개)')
+            # ✅ GITEA_URL이 설정되지 않았거나 None이면 스킵
+            if self.gitea_url:
+                self.gitea_connector = GiteaConnector(
+                    gitea_url=self.gitea_url,
+                    token=self.gitea_token
+                )
+                logger.info(f'✓ GiteaConnector 초기화 완료 (대상 저장소: {len(self.target_repos)}개)')
+            else:
+                self.gitea_connector = None
+                logger.info('⊘ Gitea URL 미설정 - Gitea 동기화 비활성화')
             
             # GitHub 커넥터
             if self.github_token:
@@ -182,6 +187,11 @@ class SyncWorker:
         Returns:
             동기화된 청크 개수
         """
+        # ✅ Gitea가 설정되지 않았으면 스킵
+        if not self.gitea_connector:
+            logger.warning('[Gitea] 커넥터 미설정 - Gitea 동기화 건너뜀')
+            return 0
+        
         logger.info(f'[Gitea] 동기화 시작... (대상: {len(self.target_repos)}개 저장소)')
         
         total_chunks = 0

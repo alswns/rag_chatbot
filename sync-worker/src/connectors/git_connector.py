@@ -652,9 +652,13 @@ class GiteaConnector(BaseGitConnector):
             chunk_overlap: 청크 간 오버랩
         """
         super().__init__(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-        self.gitea_url = gitea_url.rstrip('/')
+        # ✅ gitea_url이 None이거나 빈 문자열인 경우 방어 처리
+        if gitea_url:
+            self.gitea_url = gitea_url.rstrip('/')
+        else:
+            self.gitea_url = None
         self.token = token
-        logger.info(f'GiteaConnector 초기화: {gitea_url}')
+        logger.info(f'GiteaConnector 초기화: {gitea_url if gitea_url else "(비활성화)"}')
     
     def test_connection(self) -> bool:
         """Gitea API 연결 테스트"""

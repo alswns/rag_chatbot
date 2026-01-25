@@ -52,12 +52,12 @@ services:
     #   - --reasoning-parser deepseek_r1: R1 특화 추론 파서
     #   - --served-model-name: OpenAI 호환 API 응답 모델명
     command: >
-      serve "casperhansen/deepseek-r1-distill-qwen-14b-awq"
+      casperhansen/deepseek-r1-distill-qwen-14b-awq
       --host 0.0.0.0
       --port 8000
-      --served-model-name "DeepSeek-R1-Distill-Qwen-14B"
+      --served-model-name DeepSeek-R1-Distill-Qwen-14B
       --max-model-len 8192
-      --gpu-memory-utilization 0.90
+      --gpu-memory-utilization 0.9
       --trust-remote-code
       --quantization awq
       --dtype half
@@ -101,10 +101,10 @@ services:
     restart: unless-stopped
 
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   # ==================== RAG API Server ====================
   rag-api:
@@ -257,7 +257,8 @@ services:
       - NOTION_DATABASE_ID=${NOTION_DATABASE_ID:-}
 
       # Gitea (선택사항)
-      - GITEA_URL=${GITEA_URL:-http://gitea:3000}
+      # ✅ 비활성화 시 빈 문자열로 두기 (기본값: 빈 문자열)
+      - GITEA_URL=${GITEA_URL:-}
       - GITEA_TOKEN=${GITEA_TOKEN:-}
       - TARGET_REPOS=${TARGET_REPOS:-}
 

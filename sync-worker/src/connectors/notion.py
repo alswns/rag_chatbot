@@ -373,6 +373,108 @@ class NotionConnector:
         logger.info(f'총 {len(documents)}개 문서 준비 완료')
         return documents
     
+    def sync_pages_streaming(
+        self,
+        last_sync_time: Optional[str] = None,
+        chunking_processor=None
+    ):
+        """
+        변경된 페이지를 스트리밍 방식으로 처리 (페이지별로 즉시 반환)
+        
+        이 메서드는 다음을 수행합니다:
+        1. Delta Sync로 변경된 페이지 조회
+        2. 페이지별로 청킹
+        3. 각 페이지 완료 시 즉시 청크들 반환 (제너레이터)
+        
+        Args:
+            last_sync_time: ISO 8601 형식의 마지막 동기화 시간
+            chunking_processor: ChunkingProcessor 인스턴스
+        
+        Yields:
+            페이지별 청크 리스트 [{id, content, metadata}, ...]
+        """
+        logger.info(f'Notion 페이지 스트리밍 동기화 시작 (last_sync_time={last_sync_time})')
+        
+        # 변경된 페이지 조회
+        updated_pages = self.get_updated_pages(last_sync_time)
+        
+        if not updated_pages:
+            logger.info('변경된 페이지 없음')
+            return
+        
+        for page_info in updated_pages:
+            try:
+                page_id = page_info.get('page_id') or page_info.get('id')
+                if not page_id:
+                    logger.warning(f'page_id를 찾을 수 없습니다: {page_info.keys()}')
+                    continue
+                
+                title = page_info.get('title', 'Untitled')
+                last_edited_time = page_info.get('last_edited_time')
+                
+                logger.debug(f'[{page_id}] 페이지 처리 중... (제목: {title})')
+                
+                # 페이지 내용 조회
+                content = self.fetch_page_content(page_id)
+                
+                if not content.strip():
+                    logger.warning(f'빈 페이지 내용: {page_id}')
+                    continue
+                
+                # 청킹 처리
+                if chunking_processor:
+                    chunks = chunking_processor.process_notion_page(
+                        page_id=page_id,
+                        title=title,
+                        content=content,
+                        last_edited_time=last_edited_time
+                    )
+                    
+                    if not chunks:
+                        logger.warning(f'청킹 실패: {page_id}')
+                        continue
+                    
+                    # 페이지 URL 생성 (메타데이터용)
+                    page_url = f'{page_id}'
+                    
+                    # 페이지의 청크들을 문서 리스트로 변환
+                    page_documents = []
+                    for i, chunk in enumerate(chunks):
+                        doc = {
+                            'id': f'{page_id}#{i}',
+                            'content': chunk['content'],
+                            'metadata': {
+                                **chunk['metadata'],
+                                'source': page_url,
+                                'title': title,  # 페이지 타이틀 추가
+                            }
+                        }
+                        page_documents.append(doc)
+                    
+                    logger.debug(f'페이지 청킹 완료: {title} ({len(page_documents)}개 청크)')
+                    
+                    # 페이지 단위로 yield (즉시 반환)
+                    yield page_documents
+                
+                else:
+                    # ChunkingProcessor 없이 전체 페이지 반환
+                    page_url = f'{page_id}'
+                    doc = {
+                        'id': page_id,
+                        'content': content,
+                        'metadata': {
+                            'source': page_url,
+                            'page_id': page_id,
+                            'title': title,
+                            'last_edited_time': last_edited_time,
+                        }
+                    }
+                    yield [doc]
+                
+            except Exception as e:
+                logger.error(f'페이지 처리 실패 ({page_id}): {str(e)}', exc_info=True)
+                continue
+    
     def fetch_page_content(self, page_id: str) -> str:
         """
         페이지의 전체 내용 조회
@@ -398,7 +500,7 @@ class NotionConnector:
             return ''
     
     def _get_page_blocks(self, page_id: str, start_cursor: Optional[str] = None) -> List[Dict]:
-        """페이지의 모든 블록 재귀적으로 조회"""
+        """페이지의 모든 블록 재귀적으로 조회 (부모-자식 순서 유지)"""
         all_blocks = []
         has_more = True
         cursor = start_cursor
@@ -411,17 +513,16 @@ class NotionConnector:
                     start_cursor=cursor
                 )
                 
-                all_blocks.extend(response.get('results', []))
-                
-                has_more = response.get('has_more', False)
-                cursor = response.get('next_cursor')
-                
-                # 자식 블록도 재귀적으로 조회 (리스트, 토글 등)
+                # 부모 블록과 자식 블록을 순차적으로 추가
                 for block in response.get('results', []):
+                    all_blocks.append(block)
+                    # 해당 블록이 자식 블록을 가지면 재귀적으로 조회
                     if block.get('has_children'):
                         child_blocks = self._get_page_blocks(block['id'])
                         all_blocks.extend(child_blocks)
                 
+                has_more = response.get('has_more', False)
+                cursor = response.get('next_cursor')
                 time.sleep(0.3)
             
             return all_blocks

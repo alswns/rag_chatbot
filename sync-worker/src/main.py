@@ -112,7 +112,7 @@ class SyncWorker:
         Notion 데이터베이스 동기화
         
         - 마지막 동기화 시간 이후 변경된 페이지 조회
-        - Markdown으로 변환 및 청킹
+        - 페이지마다 청킹 후 즉시 저장 (스트리밍 방식)
         - ChromaDB에 저장 (기존 데이터는 먼저 삭제)
         
         Returns:
@@ -126,38 +126,44 @@ class SyncWorker:
             logger.info(f'[Notion] 마지막 동기화: {last_sync_time or "없음 (처음 동기화)"}')
             
             # 변경된 페이지 조회 및 처리 (Delta Sync)
-            documents = self.notion_connector.sync_pages(
-                last_sync_time=last_sync_time,
-                chunking_processor=self.chunking_processor
-            )
-            
-            if not documents:
-                logger.info('[Notion] 변경된 페이지 또는 청크 없음')
-                return 0
-            
+            # 즉시 저장하기 위해 제너레이터 사용
             total_chunks = 0
-            
-            # 페이지별로 처리 (메타데이터에서 page_id 추출)
             processed_pages = set()
             
-            for doc in documents:
-                # 메타데이터에서 source (page_id) 추출
-                source = doc['metadata'].get('source')
+            # 페이지별 스트리밍 처리
+            for page_chunks in self.notion_connector.sync_pages_streaming(
+                last_sync_time=last_sync_time,
+                chunking_processor=self.chunking_processor
+            ):
+                if not page_chunks:
+                    continue
+                
+                # 페이지별 청크가 완성되었을 때 즉시 저장
+                source = page_chunks[0]['metadata'].get('source')
+                
+                # 기존 데이터 삭제 (중복 방지)
                 if source and source not in processed_pages:
-                    # 기존 데이터 삭제 (중복 방지)
                     deleted_count = self.vector_store.delete_by_source(source)
                     if deleted_count > 0:
                         logger.debug(f'[Notion] 기존 데이터 삭제: {source} ({deleted_count}개)')
                     processed_pages.add(source)
-            
-            # 문서 배치로 저장
-            added_count = self.vector_store.add_documents(documents)
-            total_chunks += added_count
+                
+                # 페이지의 청크들을 즉시 저장
+                added_count = self.vector_store.add_documents(page_chunks)
+                total_chunks += added_count
+                
+                # 페이지 타이틀 로깅
+                page_title = page_chunks[0]['metadata'].get('title', 'Untitled')
+                logger.info(f'✓ 페이지 저장 완료: {page_title} ({len(page_chunks)}개 청크)')
             
             # 마지막 동기화 시간 업데이트
             self.sync_state.set_last_sync_time('notion')
             
-            logger.info(f'[Notion] 동기화 완료 (총 {total_chunks}개 청크)')
+            if total_chunks == 0:
+                logger.info('[Notion] 변경된 페이지 또는 청크 없음')
+            else:
+                logger.info(f'[Notion] 동기화 완료 (총 {total_chunks}개 청크)')
+            
             return total_chunks
             
         except Exception as e:

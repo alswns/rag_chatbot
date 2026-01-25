@@ -1,7 +1,6 @@
 """Connectors - 외부 데이터 소스 연결 모듈"""
 
 from .notion import NotionConnector
-from .gitea import GiteaConnector
-from .github import GitHubConnector
+from .git_connector import GitHubConnector, GiteaConnector, BaseGitConnector
 
-__all__ = ['NotionConnector', 'GiteaConnector', 'GitHubConnector']
+__all__ = ['NotionConnector', 'GitHubConnector', 'GiteaConnector', 'BaseGitConnector']

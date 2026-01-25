@@ -106,6 +106,20 @@ class ChunkingProcessor:
                             'last_edited_time': last_edited_time,
                             'source': 'notion',
                             'chunk_index': f'{i}-{j}',
+                            'header_1': chunk_metadata.get('Header 1', ''),
+                            'header_2': chunk_metadata.get('Header 2', ''),
+                            'header_3': chunk_metadata.get('Header 3', ''),
+                        }
+                    }
+                    chunks.append(chunk_dict)
+                    chunk_dict = {
+                        'content': sub_chunk,
+                        'metadata': {
+                            'page_id': page_id,
+                            'title': title,
+                            'last_edited_time': last_edited_time,
+                            'source': 'notion',
+                            'chunk_index': f'{i}-{j}',
                             # Markdown 헤더 정보 포함
                             'header_1': chunk_metadata.get('Header 1', ''),
                             'header_2': chunk_metadata.get('Header 2', ''),

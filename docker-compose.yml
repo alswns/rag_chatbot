@@ -1,16 +1,15 @@
 version: "3.8"
 
 services:
-  # vLLM Engine - GPU 최적화 LLM (CUDA 필요)
+  # vLLM Engine - GPU 최적화 LLM
   vllm:
     image: vllm/vllm-openai:latest
     container_name: rag-vllm
     ports:
       - "8000:8000"
     volumes:
-      - ./data/vllm-models:/root/.cache/huggingface/hub
+      - ./data/vllm-models:/root/.cache/huggingface
     environment:
-      - MODEL_NAME=Qwen/Qwen2.5-Coder-14B
       - HF_TOKEN=${HF_TOKEN}
     deploy:
       resources:
@@ -19,33 +18,43 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    command: vllm serve Qwen/Qwen2.5-Coder-14B --port 8000 --dtype float16
+    command: >
+      serve "unsloth/DeepSeek-R1-Distill-Qwen-14B-AWQ"
+      --port 8000
+      --max-model-len 8192
+      --gpu-memory-utilization 0.9
+      --trust-remote-code
+      --quantization awq
+      --dtype half
+      --enable-reasoning
+      --reasoning-parser deepseek_r1
     restart: unless-stopped
     networks:
       - rag-network
-    profiles:
-      - vllm
+    # profiles 부분은 수동 실행이 필요하므로, 자동 실행을 원하시면 제거하세요.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
 
-  # Ollama - CPU 최적화 LLM (온프레미스, 로컬 전용)
+  # Ollama - CPU 최적화 LLM
   ollama:
     image: ollama/ollama:latest
     container_name: rag-ollama
-    # ⚠️ 보안: 로컬 호스트만 접근 가능하도록 설정
     ports:
-      - "127.0.0.1:11434:11434"
+      - "0.0.0.0:11434:11434" # ✅ 수정: 127.0.0.1 제거
     volumes:
       - ./data/ollama:/root/.ollama
     environment:
       - OLLAMA_HOST=0.0.0.0:11434
-      # 온프레미스 설정: 데이터 로컬 저장, 외부 전송 없음
       - OLLAMA_KEEP_ALIVE=0
       - OLLAMA_NUM_PARALLEL=1
-      # 메모리 최적화 (CPU 모드)
-      - OLLAMA_MEMORY_FRACTION=0.8 # 80% 메모리만 사용
+      - OLLAMA_MEMORY_FRACTION=0.8
     restart: unless-stopped
     networks:
       - rag-network
-    # 모델 자동 다운로드 (더 가벼운 모델 사용)
     entrypoint: /bin/bash -c "ollama serve & sleep 5 && ollama pull mistral && wait"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
@@ -56,12 +65,12 @@ services:
     profiles:
       - ollama
 
-  # ChromaDB - Vector 데이터베이스 (온프레미스)
+  # ChromaDB - Vector 데이터베이스
   chromadb:
     image: chromadb/chroma:latest
     container_name: rag-chromadb
     ports:
-      - "127.0.0.1:8001:8000"
+      - "0.0.0.0:8001:8000" # ✅ 수정: 127.0.0.1 제거
     volumes:
       - ./data/chromadb:/chroma/chroma
     environment:
@@ -72,7 +81,7 @@ services:
     networks:
       - rag-network
 
-  # Sync Worker - Notion/Gitea/GitHub 동기화 (온프레미스)
+  # Sync Worker - Notion/Gitea/GitHub 동기화
   sync-worker:
     build:
       context: ./sync-worker
@@ -97,7 +106,7 @@ services:
     networks:
       - rag-network
 
-  # RAG Inference API Server - FastAPI (온프레미스)
+  # RAG Inference API Server - FastAPI
   rag-api:
     build:
       context: ./sync-worker
@@ -105,37 +114,39 @@ services:
     container_name: rag-api-server
     command: uvicorn src.server:app --host 0.0.0.0 --port 9000
     ports:
-      - "127.0.0.1:9000:9000"
+      - "0.0.0.0:9000:9000" # ✅ 수정: 127.0.0.1 제거
     environment:
       - PYTHONPATH=/app/src
       - VLLM_API_URL=${VLLM_API_URL:-http://vllm:8000/v1}
       - OLLAMA_API_URL=${OLLAMA_API_URL:-http://ollama:11434}
-      - LLM_BACKEND=${LLM_BACKEND:-auto}
+      - LLM_BACKEND=${LLM_BACKEND:-vllm} # ✅ auto → vllm으로 변경 (기본값)
       - CHROMA_HOST=chromadb
       - CHROMA_PORT=8000
       - SEARCH_TOP_K=${SEARCH_TOP_K:-5}
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=9000
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      - chromadb
     restart: unless-stopped
     networks:
       - rag-network
 
-  # Open WebUI - RAG 웹 인터페이스 (온프레미스)
+  # Open WebUI - RAG 웹 인터페이스
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     container_name: rag-webui
     ports:
-      - "3000:8080"
+      - "0.0.0.0:3000:8080"
     volumes:
       - ./data/open-webui:/app/backend/data
     environment:
-      - OPENAI_API_BASE_URL=${OPENAI_API_BASE_URL:-http://ollama:11434/api}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-ollama}
+      # ✅ 이 부분이 중요!
+      - OPENAI_API_BASE_URL=http://rag-api:9000/v1
+      - OPENAI_API_KEY=sk-default
       - WEBUI_AUTH=false
       - WEBUI_TRUSTED_HEADER_AUTH_ENABLED=false
-    depends_on:
-      - rag-api
+
     restart: unless-stopped
     networks:
       - rag-network

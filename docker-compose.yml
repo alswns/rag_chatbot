@@ -94,7 +94,7 @@ services:
   # ==================== RAG API Server ====================
   rag-api:
     # ✅ [Chief Cloud Architect] 빌드 캐시 활용을 위해 이미지명 통일
-    image: rag-backend:latest
+    image: rag-api-server:latest
     container_name: rag-api
 
     build:
@@ -236,7 +236,7 @@ services:
   # ==================== Sync Worker (데이터 동기화) ====================
   sync-worker:
     # ✅ rag-api와 동일한 이미지 사용 (빌드 캐시 활용)
-    image: rag-backend:latest
+    image: rag-sync-worker:latest
     container_name: rag-sync
 
     build:

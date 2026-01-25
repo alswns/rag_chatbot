@@ -244,7 +244,7 @@ class VectorStoreManager:
             vector_scores = []
             for i, doc_id in enumerate(vector_results['ids'][0]):
                 # 거리를 유사도 점수로 변환 (코사인 거리: 0~2, 유사도: 1~(-1))
-                similarity = 1 - vector_results['distances'][0][i]
+                similarity = 1 / (1 + vector_results['distances'][0][i])
                 vector_scores.append({
                     'id': doc_id,
                     'content': vector_results['documents'][0][i],

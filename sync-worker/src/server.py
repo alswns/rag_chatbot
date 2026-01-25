@@ -55,7 +55,7 @@ app = FastAPI(
 
 # ==================== 설정 ====================
 
-MODEL_NAME = os.getenv('LLM_MODEL_ID', 'DeepSeek-R1-Distill-Qwen-14B')
+MODEL_NAME = os.getenv('LLM_MODEL_ID', 'DeepSeek-R1-Distill-8B')
 LLM_BACKEND = os.getenv('LLM_BACKEND', 'vllm').lower()
 VLLM_API_URL = os.getenv('VLLM_API_URL', 'http://localhost:8000/v1')
 OLLAMA_API_URL = os.getenv('OLLAMA_API_URL', 'http://localhost:11434')
@@ -126,11 +126,13 @@ class VectorSearchManager:
             if not search_results:
                 logger.info('⚠️  검색 결과 없음')
                 return "<documents></documents>"
-            
+            threshold = float(os.getenv('SIMILARITY_THRESHOLD', '0.3'))
+            for r in search_results:
+                logger.info(f'문서 ID: {r["id"]}, 유사도: {r["vector_score"]:.4f}')
             # 유사도 필터링 (0.4 이상만 포함)
             filtered_results = [
                 r for r in search_results
-                if r.get('distance', float('inf')) <= 0.4
+                if r.get('vector_score', float('inf')) >= threshold
             ]
             
             if not filtered_results:
@@ -276,13 +278,35 @@ class QuestionAnsweringManager:
         
         try:
             logger.info('📡 vLLM 호출 중...')
+            MODEL_CONTEXT_LIMIT = 4096 
             
+            # 현재 입력 길이 추정 (한글은 토큰을 많이 먹으므로 글자수 / 1.5 정도로 계산)
+            # 정확한건 tokenizer가 필요하지만, 근사치로 계산합니다.
+            # user_message + context + history 등 모든 텍스트 합산
+            all_text = QuestionAnsweringManager.SYSTEM_PROMPT
+            for msg in messages:
+                all_text += msg.get('content', '')
+                
+            estimated_input_tokens = len(all_text) / 1.8  # 보수적으로 잡음
+            
+            # 남은 공간 계산
+            remaining_tokens = MODEL_CONTEXT_LIMIT - int(estimated_input_tokens) - 200 # 200은 안전버퍼
+            
+            # 요청할 토큰 수 결정 (기본값 2048과 남은 공간 중 작은 것 선택)
+            safe_max_tokens = min(max_tokens, remaining_tokens)
+            
+            # 만약 공간이 너무 없으면 최소 512는 확보 (RAG 문서를 잘라야 함 - 여기선 일단 진행)
+            if safe_max_tokens < 512:
+                logger.warning(f'⚠️ 답변 공간 부족! (남은 공간: {remaining_tokens})')
+                safe_max_tokens = 512 # 에러가 날 수 있지만 강행
+
+            logger.info(f'🔢 토큰 계산: 입력약 {int(estimated_input_tokens)} + 출력 {safe_max_tokens} <= {MODEL_CONTEXT_LIMIT}')
             response = vllm_client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=messages,
                 temperature=temperature,
                 top_p=0.95,
-                max_tokens=max_tokens,
+                max_tokens=safe_max_tokens,
                 stream=stream,
                 stop=[
                     "<|file_sep|>",

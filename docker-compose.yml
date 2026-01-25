@@ -31,7 +31,7 @@ services:
       # GPU 메모리 최적화 (0.9 고정 - 0.95는 불안정)
       - VLLM_GPU_MEMORY_UTILIZATION=0.9
       # DeepSeek-R1 모델 설정
-      - LLM_MODEL_ID=${LLM_MODEL_ID:-unsloth/DeepSeek-R1-Distill-Qwen-14B-AWQ}
+      - LLM_MODEL_ID=${LLM_MODEL_ID:-casperhansen/deepseek-r1-distill-llama-8b-awq}
       # vLLM 로깅
       - VLLM_LOG_LEVEL=INFO
 
@@ -44,17 +44,17 @@ services:
     ports:
       - "8000:8000"
     command: >
-      casperhansen/deepseek-r1-distill-qwen-14b-awq
+      casperhansen/deepseek-r1-distill-llama-8b-awq
       --host 0.0.0.0
       --port 8000
-      --served-model-name DeepSeek-R1-Distill-Qwen-14B
-      --max-model-len 4096
-      --gpu-memory-utilization 0.85
+      --served-model-name DeepSeek-R1-Distill-8B
+      --max-model-len 8192            # ✅ 컨텍스트 길이를 2배로 확장 (RAG 에러 방지)
+      --max-num-seqs 10               # ✅ 동시 접속자 10명 대응 대기열
+      --gpu-memory-utilization 0.9    # VRAM 점유 최적화
+      --enforce-eager                # 추론 속도 가속
       --trust-remote-code
       --quantization awq
       --dtype half
-      --enforce-eager               
-      --disable-log-requests
 
     # 네트워크
     networks:
@@ -104,8 +104,8 @@ services:
       - LLM_BACKEND=vllm
       - VLLM_API_URL=http://vllm:8000/v1
       # ✅ docker-compose 환경변수 반영
-      # - LLM_MODEL_ID=${LLM_MODEL_ID:-casperhansen/deepseek-r1-distill-qwen-14b-awq}
-      - LLM_MODEL_ID = DeepSeek-R1-Distill-Qwen-14B
+      # - LLM_MODEL_ID=${LLM_MODEL_ID:-casperhansen/deepseek-r1-distill-llama-8b-awq}
+      - LLM_MODEL_ID = DeepSeek-R1-Distill-8B
 
       # ChromaDB 설정
       - CHROMA_HOST=chromadb
@@ -148,7 +148,7 @@ services:
     environment:
       # ✅ [Chief Cloud Architect] 기본 모델을 DeepSeek-R1로 설정
       # 사용자가 모델 선택 없이 바로 대화 가능
-      - DEFAULT_MODEL=DeepSeek-R1-Distill-Qwen-14B
+      - DEFAULT_MODEL=DeepSeek-R1-Distill-8B
 
       # RAG API 연결
       - OPENAI_API_BASE_URL=http://rag-api:8010/v1
@@ -165,12 +165,12 @@ services:
       # ✅ [Hotfix] 기본 사용자 자동 생성 (로그인 없음)
       # WEBUI_AUTH_ENABLED=false와 함께 사용하면 관리자 계정 자동 생성
       - WEBUI_DEFAULT_USER_ROLE=admin
-      - WEBUI_DEFAULT_MODELS=DeepSeek-R1-Distill-Qwen-14B
+      - WEBUI_DEFAULT_MODELS=DeepSeek-R1-Distill-8B
 
       # ✅ [Hotfix] 모델 필터 비활성화하여 RAG API 모델 자동 감지
       # ENABLE_MODEL_FILTER=false로 모든 모델을 Open WebUI에서 표시
       - ENABLE_MODEL_FILTER=true
-      - MODEL_FILTER_LIST = DeepSeek-R1-Distill-Qwen-14B
+      - MODEL_FILTER_LIST = DeepSeek-R1-Distill-8B
       - ENABLE_MODEL_CHANGER = false
       - SHOW_ADMIN_DETAILS = false
 

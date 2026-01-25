@@ -315,18 +315,17 @@ class VectorStoreManager:
                 logger.info(f'⏳ Reranking 시작: {query} ({len(vector_scores)}개 후보)')
                 
                 try:
-                    # FlashRank 포맷: [{"id": "...", "text": "...", "meta": {...}}]
+                    # FlashRank 포맷: List[{"id": "...", "text": "..."}]
                     passages = [
                         {
                             "id": r['id'],
-                            "text": r['content'],
-                            "meta": r.get('metadata', {})
+                            "text": r['content']
                         }
                         for r in vector_scores
                     ]
                     
-                    # Reranking 실행
-                    ranked = self.ranker.rank(query, passages, top_k=top_k)
+                    # ✅ FlashRank rerank() 메서드 호출 (올바른 API)
+                    ranked = self.ranker.rerank(query, passages, top_k=top_k)
                     
                     # Reranked 결과를 원본 포맷으로 변환
                     reranked_results = []
@@ -336,14 +335,21 @@ class VectorStoreManager:
                             if orig['id'] == ranked_item['id']:
                                 reranked_results.append({
                                     **orig,
-                                    'reranker_score': float(ranked_item['score']),
+                                    'reranker_score': float(ranked_item.get('score', 0.0)),
                                     'reranker_rank': rank_idx + 1
                                 })
                                 break
                     
-                    logger.info(f'✅ Reranking 완료: 상위 {len(reranked_results)}개 (1위 점수: {reranked_results[0]["reranker_score"]:.4f})')
-                    return reranked_results
+                    if reranked_results:
+                        logger.info(f'✅ Reranking 완료: 상위 {len(reranked_results)}개 (1위 점수: {reranked_results[0].get("reranker_score", 0.0):.4f})')
+                        return reranked_results
+                    else:
+                        logger.warning('⚠️  Reranking 결과 없음 (Hybrid 결과로 폴백)')
+                        return vector_scores[:top_k]
                     
+                except AttributeError as e:
+                    logger.warning(f'⚠️  FlashRank API 오류: {str(e)}. Hybrid 결과로 폴백합니다.')
+                    return vector_scores[:top_k]
                 except Exception as e:
                     logger.warning(f'⚠️  Reranking 오류 (Hybrid 결과로 폴백): {str(e)}')
                     return vector_scores[:top_k]

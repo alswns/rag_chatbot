@@ -532,7 +532,11 @@ class NotionConnector:
             return []
     
     def _blocks_to_markdown(self, blocks: List[Dict]) -> str:
-        """블록 리스트를 Markdown 형식으로 변환"""
+        """
+        ✅ [긴급 데이터 품질 개선] 블록 리스트를 Markdown 형식으로 변환
+        
+        URL만 추출되는 버그 방지: 순수 텍스트만 추출하고 이미지/파일 URL 제외
+        """
         markdown_lines = []
         
         for block in blocks:
@@ -540,53 +544,91 @@ class NotionConnector:
             block_data = block.get(block_type, {})
             
             try:
+                text = None
+                
                 if block_type == 'heading_1':
                     text = self._extract_rich_text(block_data.get('rich_text', []))
-                    markdown_lines.append(f'# {text}\n')
+                    if text.strip():  # ✅ 공백만 있으면 제외
+                        markdown_lines.append(f'# {text}\n')
+                        logger.debug(f'[Notion] H1: {text[:50]}')
                 
                 elif block_type == 'heading_2':
                     text = self._extract_rich_text(block_data.get('rich_text', []))
-                    markdown_lines.append(f'## {text}\n')
+                    if text.strip():
+                        markdown_lines.append(f'## {text}\n')
+                        logger.debug(f'[Notion] H2: {text[:50]}')
                 
                 elif block_type == 'heading_3':
                     text = self._extract_rich_text(block_data.get('rich_text', []))
-                    markdown_lines.append(f'### {text}\n')
+                    if text.strip():
+                        markdown_lines.append(f'### {text}\n')
+                        logger.debug(f'[Notion] H3: {text[:50]}')
                 
                 elif block_type == 'paragraph':
                     text = self._extract_rich_text(block_data.get('rich_text', []))
-                    if text:
+                    if text.strip():
                         markdown_lines.append(f'{text}\n')
+                        logger.debug(f'[Notion] 단락: {text[:50]}')
                 
                 elif block_type == 'bulleted_list_item':
                     text = self._extract_rich_text(block_data.get('rich_text', []))
-                    markdown_lines.append(f'- {text}\n')
+                    if text.strip():
+                        markdown_lines.append(f'- {text}\n')
+                        logger.debug(f'[Notion] 불릿: {text[:50]}')
                 
                 elif block_type == 'numbered_list_item':
                     text = self._extract_rich_text(block_data.get('rich_text', []))
-                    markdown_lines.append(f'1. {text}\n')
+                    if text.strip():
+                        markdown_lines.append(f'1. {text}\n')
+                        logger.debug(f'[Notion] 번호: {text[:50]}')
                 
                 elif block_type == 'code':
                     text = self._extract_rich_text(block_data.get('rich_text', []))
                     language = block_data.get('language', 'text')
-                    markdown_lines.append(f'```{language}\n{text}\n```\n')
+                    if text.strip():
+                        markdown_lines.append(f'```{language}\n{text}\n```\n')
+                        logger.debug(f'[Notion] 코드 ({language}): {text[:50]}')
                 
                 elif block_type == 'quote':
                     text = self._extract_rich_text(block_data.get('rich_text', []))
-                    markdown_lines.append(f'> {text}\n')
+                    if text.strip():
+                        markdown_lines.append(f'> {text}\n')
+                        logger.debug(f'[Notion] 인용: {text[:50]}')
                 
                 elif block_type == 'divider':
                     markdown_lines.append('---\n')
+                    logger.debug('[Notion] 구분선')
                 
+                # ✅ [중요] 이미지/파일 블록은 URL 대신 텍스트만 추출
                 elif block_type == 'image':
-                    url = self._extract_image_url(block_data)
-                    if url:
-                        markdown_lines.append(f'![image]({url})\n')
+                    # URL 대신, caption 텍스트만 가져오기
+                    caption_text = self._extract_rich_text(block_data.get('caption', []))
+                    if caption_text.strip():
+                        markdown_lines.append(f'[이미지] {caption_text}\n')
+                        logger.debug(f'[Notion] 이미지 캡션: {caption_text[:50]}')
+                    else:
+                        logger.debug('[Notion] 이미지 캡션 없음 (URL 제외)')
+                
+                elif block_type == 'file':
+                    # 파일도 URL 대신 caption만
+                    caption_text = self._extract_rich_text(block_data.get('caption', []))
+                    if caption_text.strip():
+                        markdown_lines.append(f'[파일] {caption_text}\n')
+                        logger.debug(f'[Notion] 파일 캡션: {caption_text[:50]}')
+                    else:
+                        logger.debug('[Notion] 파일 캡션 없음 (URL 제외)')
+                
+                else:
+                    logger.debug(f'[Notion] 미지원 블록 타입: {block_type}')
                 
             except Exception as e:
-                logger.warning(f'블록 변환 중 오류 ({block_type}): {str(e)}')
+                logger.warning(f'블록 변환 중 오류 ({block_type}): {str(e)}', exc_info=True)
                 continue
         
-        return ''.join(markdown_lines)
+        final_markdown = ''.join(markdown_lines)
+        logger.info(f'✅ Markdown 변환 완료: {len(final_markdown)}자 (원본: {len(blocks)}개 블록)')
+        
+        return final_markdown
     
     def _extract_rich_text(self, rich_text_list: List[Dict]) -> str:
         """Rich Text 리스트를 일반 텍스트로 변환"""

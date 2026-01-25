@@ -225,18 +225,27 @@ class ModelManager:
 class QuestionAnsweringManager:
     """DeepSeek-R1 기반 답변 생성"""
     
-    SYSTEM_PROMPT = """당신은 박민준 개발자의 프로젝트를 돕는 'DeepSeek-R1 기반 AI 엔진'입니다.
-제공된 <documents> 데이터를 기반으로 논리적으로 추론하여 답변하세요.
+    SYSTEM_PROMPT = """당신은 박민준 개발자의 프로젝트 전담 한국인 비서입니다.
 
-[답변 작성 절차]
-1. **Analyze**: 사용자의 질문 의도를 파악하고 <documents> 내의 정보와 대조하세요.
-2. **Think**: 문서의 내용이 질문을 해결하는 데 충분한지 논리적으로 따져보세요. (생각 과정을 <think> 태그에 담으세요)
-3. **Answer**: 분석된 내용을 바탕으로 개발자에게 필요한 코드나 솔루션을 구체적으로 제시하세요.
+[🔴 언어 규칙 - 절대 엄수]
+1. <think>를 포함한 모든 사고 과정과 최종 답변은 100% '한국어'로만 작성하세요.
+   - 영어로 생각하지 마세요. 한국어로 생각하세요.
+   - 기술 용어(Docker, React, Python 등)를 제외한 모든 문장은 한국어입니다.
+2. 중국어, 일본어, 태국어 절대 금지.
+3. 한국어 문법에 맞는 자연스러운 문장만 작성.
 
-[제약 사항]
-- <documents> 태그 안의 내용만 사실로 간주하세요.
-- 문서에 없는 내용은 "문서에 명시되지 않았으나, 일반적인 지식으로는..."이라고 구분하여 답하세요.
-- 맹목적인 친절함보다는 정확한 기술적 솔루션을 우선하세요."""
+[📋 RAG 규칙]
+1. **데이터 품질 체크**: <documents> 내에 유의미한 텍스트가 없고 URL 주소(https://..., s3://...)만 있다면, 다음을 한국어로 정직하게 답하세요:
+   "현재 저장된 문서 데이터가 URL 형태로만 존재하여 내용을 읽을 수 없습니다. 데이터 동기화 로직을 확인해 주세요."
+
+2. **문서 조각화**: 검색된 문서들이 파편화되어 있다면, 앞뒤 맥락을 추론하여 하나의 완성된 정보로 요약하세요.
+
+3. **문서 출처**: 답변할 때 "문서에 따르면..." 또는 "[출처]" 형식으로 출처를 명시하세요.
+
+[🎯 답변 스타일]
+- 기술적 정확성 > 친절함
+- 에러 메시지는 한국어로 설명
+- 코드 예시는 주석을 한국어로 작성"""
     
     @staticmethod
     def extract_user_message(messages: List[ChatMessage]) -> Optional[str]:
@@ -278,27 +287,7 @@ class QuestionAnsweringManager:
         
         try:
             logger.info('📡 vLLM 호출 중...')
-            MODEL_CONTEXT_LIMIT = 4096 
             
-            # 현재 입력 길이 추정 (한글은 토큰을 많이 먹으므로 글자수 / 1.5 정도로 계산)
-            # 정확한건 tokenizer가 필요하지만, 근사치로 계산합니다.
-            # user_message + context + history 등 모든 텍스트 합산
-            all_text = QuestionAnsweringManager.SYSTEM_PROMPT
-            for msg in messages:
-                all_text += msg.get('content', '')
-                
-            estimated_input_tokens = len(all_text) / 1.8  # 보수적으로 잡음
-            
-            # 남은 공간 계산
-            remaining_tokens = MODEL_CONTEXT_LIMIT - int(estimated_input_tokens) - 200 # 200은 안전버퍼
-            
-            # 요청할 토큰 수 결정 (기본값 2048과 남은 공간 중 작은 것 선택)
-            safe_max_tokens = min(max_tokens, remaining_tokens)
-            
-            # 만약 공간이 너무 없으면 최소 512는 확보 (RAG 문서를 잘라야 함 - 여기선 일단 진행)
-            if safe_max_tokens < 512:
-                logger.warning(f'⚠️ 답변 공간 부족! (남은 공간: {remaining_tokens})')
-                safe_max_tokens = 512 # 에러가 날 수 있지만 강행
 
             logger.info(f'🔢 토큰 계산: 입력약 {int(estimated_input_tokens)} + 출력 {safe_max_tokens} <= {MODEL_CONTEXT_LIMIT}')
             response = vllm_client.chat.completions.create(
@@ -306,7 +295,7 @@ class QuestionAnsweringManager:
                 messages=messages,
                 temperature=temperature,
                 top_p=0.95,
-                max_tokens=safe_max_tokens,
+                max_tokens=max_tokens,
                 stream=stream,
                 stop=[
                     "<|file_sep|>",
@@ -444,8 +433,8 @@ async def list_models() -> Dict:
     
     return {
         'object': 'list',
-        # 'data': models
-        "data": [{"id": "DeepSeek-R1-Distill-Qwen-14B", "object": "model"}]
+        'data': models
+        # "data": [{"id": "DeepSeek-R1-Distill-Qwen-14B", "object": "model"}]
     }
 
 

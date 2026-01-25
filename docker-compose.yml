@@ -43,19 +43,26 @@ services:
     # 포트
     ports:
       - "8000:8000"
-    command: >
-      casperhansen/deepseek-r1-distill-llama-8b-awq
-      --host 0.0.0.0
-      --port 8000
-      --served-model-name DeepSeek-R1-Distill-8B
-      --max-model-len 8192            # ✅ 컨텍스트 길이를 2배로 확장 (RAG 에러 방지)
-      --max-num-seqs 10               # ✅ 동시 접속자 10명 대응 대기열
-      --gpu-memory-utilization 0.9    # VRAM 점유 최적화
-      --enforce-eager                # 추론 속도 가속
-      --trust-remote-code
-      --quantization awq
-      --dtype half
-
+    command:
+      - "casperhansen/deepseek-r1-distill-llama-8b-awq"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--served-model-name"
+      - "DeepSeek-R1-Distill-8B"
+      - "--max-model-len"
+      - "8192"
+      - "--max-num-seqs"
+      - "10"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--enforce-eager"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "awq"
+      - "--dtype"
+      - "half"
     # 네트워크
     networks:
       - rag-network

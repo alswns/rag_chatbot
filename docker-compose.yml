@@ -43,14 +43,6 @@ services:
     # 포트
     ports:
       - "8000:8000"
-
-    # vLLM API 시작 커맨드
-    # ✅ [Chief Cloud Architect] AWS g5.xlarge 최적화 옵션:
-    #   - --gpu-memory-utilization 0.9: GPU 메모리 최적화 (0.95는 시스템 불안정 유발)
-    #   - --max-model-len 8192: RAG Context 최대 토큰 (질의 + 검색 문서 통합)
-    #   - --enable-reasoning: DeepSeek-R1 추론 모드 활성화
-    #   - --reasoning-parser deepseek_r1: R1 특화 추론 파서
-    #   - --served-model-name: OpenAI 호환 API 응답 모델명
     command: >
       casperhansen/deepseek-r1-distill-qwen-14b-awq
       --host 0.0.0.0
@@ -110,7 +102,8 @@ services:
       - LLM_BACKEND=vllm
       - VLLM_API_URL=http://vllm:8000/v1
       # ✅ docker-compose 환경변수 반영
-      - LLM_MODEL_ID=${LLM_MODEL_ID:-unsloth/DeepSeek-R1-Distill-Qwen-14B-AWQ}
+      # - LLM_MODEL_ID=${LLM_MODEL_ID:-casperhansen/deepseek-r1-distill-qwen-14b-awq}
+      - LLM_MODEL_ID = DeepSeek-R1-Distill-Qwen-14B
 
       # ChromaDB 설정
       - CHROMA_HOST=chromadb
@@ -132,6 +125,10 @@ services:
 
     networks:
       - rag-network
+
+    # ✅ [Chief Cloud Architect] rag-api는 server.py 실행
+    # Dockerfile의 CMD를 override하여 server.py 실행
+    command: python -u src/server.py
 
     # ✅ [Chief Cloud Architect] vLLM + ChromaDB 모두 준비 후 실행
     # 이 설정이 없으면 의존성 미충족으로 서버가 오류 발생하거나 무한 대기
@@ -271,6 +268,11 @@ services:
 
     networks:
       - rag-network
+
+    # ✅ [Chief Cloud Architect] rag-sync는 main.py 실행 (Dockerfile 기본값)
+    # Dockerfile의 기본 CMD: python -u src/main.py
+    # 명시적으로 동일하게 설정
+    command: python -u src/main.py
 
     restart: unless-stopped
 

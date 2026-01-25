@@ -62,14 +62,6 @@ services:
       --quantization awq
       --dtype half
 
-    # 헬스 체크 (모델 로딩 15GB ≈ 3-5분 소요)
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 10s
-      timeout: 10s
-      retries: 30
-      start_period: 300s # ✅ 5분 대기 (모델 로딩 시간 확보)
-
     # 네트워크
     networks:
       - rag-network
@@ -99,15 +91,6 @@ services:
       - rag-network
 
     restart: unless-stopped
-
-    # ✅ [Hotfix] chromadb API v2 heartbeat 엔드포인트 사용
-    # 최신 chromadb는 /api/v2/heartbeat를 사용함
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
-      interval: 10s
-      timeout: 5s
-      retries: 15
-      start_period: 30s
 
   # ==================== RAG API Server ====================
   rag-api:
@@ -153,18 +136,10 @@ services:
     # ✅ [Chief Cloud Architect] vLLM + ChromaDB 모두 준비 후 실행
     # 이 설정이 없으면 의존성 미충족으로 서버가 오류 발생하거나 무한 대기
     depends_on:
-      vllm:
-        condition: service_healthy
-      chromadb:
-        condition: service_healthy
+      - vllm
+      - chromadb
 
     restart: unless-stopped
-
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   # ==================== Open WebUI (Interactive Chat) ====================
   open-webui:
@@ -184,6 +159,30 @@ services:
       - WEBUI_NAME="Enterprise RAG Chat"
       - WEBUI_URL=http://localhost:3000
 
+      # ✅ [Hotfix] Admin 계정 없이 바로 로그인 가능
+      # 로컬 환경이므로 인증 비활성화
+      - WEBUI_AUTH_ENABLED=false
+
+      # ✅ [Hotfix] 기본 사용자 자동 생성 (로그인 없음)
+      # WEBUI_AUTH_ENABLED=false와 함께 사용하면 관리자 계정 자동 생성
+      - WEBUI_DEFAULT_USER_ROLE=admin
+      - WEBUI_DEFAULT_MODELS=DeepSeek-R1-Distill-Qwen-14B
+
+      # ✅ [Hotfix] 모델 필터 비활성화하여 RAG API 모델 자동 감지
+      # ENABLE_MODEL_FILTER=false로 모든 모델을 Open WebUI에서 표시
+      - ENABLE_MODEL_FILTER=false
+
+      # ✅ [Hotfix] OpenAI API 호환성 강화
+      # ENABLE_OLLAMA_API=false로 Local Ollama 비활성화 (RAG API만 사용)
+      - ENABLE_OLLAMA_API=false
+      - ENABLE_OPENAI_API=true
+
+      # ✅ [Hotfix] API 응답 타임아웃 증가 (모델 로딩 시간 고려)
+      - QUERY_TIMEOUT=120
+
+      # ✅ [Hotfix] 데이터베이스 연결 풀 최적화
+      - DATABASE_URL=sqlite:////app/backend/data/webui.db
+
       # 보안
       - SCOPED_FILE_UPLOAD_MAX_SIZE_MB=100
       - ENABLE_OAUTH_SIGNUP=false
@@ -199,16 +198,9 @@ services:
       - rag-network
 
     depends_on:
-      rag-api:
-        condition: service_healthy
+      - rag-api
 
     restart: unless-stopped
-
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   # ==================== Ollama (CPU Backup) ====================
   ollama:

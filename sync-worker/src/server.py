@@ -501,16 +501,44 @@ async def health_check():
 
 @app.get('/v1/models', tags=['Models'])
 async def list_models():
-    """vLLM의 모델 목록 반환 (OpenAI 호환)"""
+    """
+    ✅ [Open WebUI 통합] vLLM의 모델 목록 반환 (OpenAI 호환)
+    
+    Open WebUI가 이 엔드포인트를 호출하여 사용 가능한 모델을 감지합니다.
+    available_models가 비어있으면 기본값으로 MODEL_NAME을 반환합니다.
+    """
     global available_models
+    
+    # 기본 모델 정보 구성
+    model_data = available_models if available_models else [{
+        'id': MODEL_NAME,
+        'object': 'model',
+        'created': int(datetime.now().timestamp()),
+        'owned_by': 'vllm',
+        'permission': [
+            {
+                'id': 'modelperm-default',
+                'object': 'model_permission',
+                'created': int(datetime.now().timestamp()),
+                'allow_create_engine': False,
+                'allow_sampling': True,
+                'allow_logprobs': False,
+                'allow_search_indices': False,
+                'allow_view': True,
+                'allow_fine_tuning': False,
+                'organization': '*',
+                'group_id': None,
+                'is_blocking': False
+            }
+        ]
+    }]
+    
+    logger.info(f'✅ /v1/models 요청 - {len(model_data)}개 모델 반환')
+    logger.debug(f'모델 데이터: {model_data}')
+    
     return {
         'object': 'list',
-        'data': available_models if available_models else [{
-            'id': MODEL_NAME,
-            'object': 'model',
-            'created': int(datetime.now().timestamp()),
-            'owned_by': 'vllm'
-        }]
+        'data': model_data
     }
 
 

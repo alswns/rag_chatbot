@@ -461,15 +461,25 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
             {'role': 'system', 'content': QuestionAnsweringManager.SYSTEM_PROMPT}
         ]
         
-        # 과거 대화 추가
-        for msg in request.messages[:-1]:
+        # ✅ [수정] 토큰 제한을 고려하여 최근 메시지만 포함
+        # 너무 오래된 대화는 제외하여 토큰 절약
+        # 하지만 최근 2-3개는 포함하여 대화의 연결성 유지
+        max_history = 3  # 최근 3개 메시지까지만 포함
+        
+        # 현재 메시지 이전의 모든 메시지 중 최근 max_history개만 선택
+        history_messages = request.messages[:-1]  # 현재 메시지 제외
+        if len(history_messages) > max_history:
+            history_messages = history_messages[-max_history:]  # 최근 max_history개만
+        
+        # 선택된 과거 메시지 추가
+        for msg in history_messages:
             if msg.role in ['user', 'assistant']:
                 vllm_messages.append({'role': msg.role, 'content': msg.content})
         
-        # 최종 사용자 메시지
-        vllm_messages.append({'role': 'user', 'content': final_user_content})
+        logger.info(f'메시지: System + History({len(history_messages)}) + Current = {len(vllm_messages)+1}개')
         
-        logger.info(f'메시지: System + History({len(vllm_messages)-2}) + Current = {len(vllm_messages)}개')
+        # 최종 사용자 메시지 추가 (검색된 컨텍스트 포함)
+        vllm_messages.append({'role': 'user', 'content': final_user_content})
         
         # 4️⃣  LLM 호출
         logger.info('Step 3: LLM 호출...')

@@ -2,7 +2,7 @@
 VectorStoreManager - ChromaDB를 통한 벡터 저장소 관리
 
 HuggingFace의 BAAI/bge-m3 임베딩 모델을 사용하여 문서를 저장하고 조회합니다.
-Hybrid Search (BM25 + Vector)를 지원하여 검색 정확도를 높입니다.
+Hybrid Search (BM25 + Vector) + Reranking으로 검색 정확도를 극대화합니다.
 """
 
 import logging
@@ -13,6 +13,15 @@ import time
 import torch
 from rank_bm25 import BM25Okapi
 import re
+
+# ✅ [Reranking] FlashRank 임포트
+try:
+    from flashrank import Ranker
+    FLASHRANK_AVAILABLE = True
+except ImportError:
+    FLASHRANK_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logger.warning('⚠️  FlashRank 미설치: Reranking 기능 비활성화')
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +99,22 @@ class VectorStoreManager:
         self.bm25_index: Optional[BM25Okapi] = None
         self.bm25_corpus: List[List[str]] = []
         self.bm25_doc_ids: List[str] = []
+        
+        # ✅ [Reranking] FlashRank Reranker 초기화
+        self.ranker: Optional[Ranker] = None
+        if FLASHRANK_AVAILABLE:
+            try:
+                logger.info('⏳ FlashRank Reranker 초기화 중...')
+                self.ranker = Ranker(
+                    model_name="ms-marco-MiniLM-L-12-v2",
+                    cache_dir="/app/models"
+                )
+                logger.info('✅ FlashRank Reranker 초기화 완료 (가벼운 모델: ~40MB)')
+            except Exception as e:
+                logger.warning(f'⚠️  FlashRank 초기화 실패: {str(e)}. Reranking 없이 진행합니다.')
+                self.ranker = None
+        else:
+            logger.warning('⚠️  FlashRank 미설치: Reranking 기능 비활성화')
     
     def add_documents(self, documents: List[Dict[str, Any]], batch_size: int = 100) -> int:
         """
@@ -221,19 +246,24 @@ class VectorStoreManager:
     
     def search(self, query: str, top_k: int = 5, use_hybrid: bool = True) -> List[Dict[str, Any]]:
         """
-        하이브리드 검색 (Vector + BM25)
+        ✅ [하이브리드 + Reranking] Hybrid Search + 정밀 재정렬
+        
+        3단계 검색:
+        1. [Broad] 벡터 + BM25로 20개 후보 추출 (빠르지만 부정확)
+        2. [Reranking] 정밀 Reranker가 20개를 꼼꼼히 재평가 (정확함)
+        3. [Select] Reranking 상위 top_k개 반환
         
         Args:
             query: 검색 쿼리
             top_k: 반환할 상위 문서 개수
-            use_hybrid: 하이브리드 검색 사용 여부 (False면 벡터 검색만)
+            use_hybrid: 하이브리드 검색 사용 여부
         
         Returns:
-            재정렬된 검색 결과 리스트
+            정밀하게 재정렬된 검색 결과
         """
         try:
-            # 1단계: 벡터 검색 (더 많은 문서를 검색한 후 재정렬)
-            search_k = min(top_k * 3, 50)  # 상위 50개까지 검색
+            # [Step 1] 1차 검색: 벡터 + BM25 (넉넉하게 20개 추출)
+            search_k = min(top_k * 4, 20)  # top_k=5면 20개, top_k=2면 8개
             
             query_embedding = self.embeddings.embed_query(query)
             vector_results = self.collection.query(
@@ -257,33 +287,73 @@ class VectorStoreManager:
             if not use_hybrid or not vector_scores:
                 return vector_scores[:top_k]
             
-            # 2단계: BM25 점수 계산
+            # [Step 2] BM25 점수 계산
             bm25_scores = self._calculate_bm25_scores(
                 query=query,
                 doc_ids=[r['id'] for r in vector_scores],
                 documents=[r['content'] for r in vector_scores]
             )
             
-            # 3단계: 재정렬 (가중치 합산: 0.7 * 벡터 + 0.3 * BM25)
+            # [Step 3] Hybrid 스코어 계산 (0.7 * 벡터 + 0.3 * BM25)
             for result in vector_scores:
                 doc_id = result['id']
                 bm25_score = bm25_scores.get(doc_id, 0.0)
                 result['bm25_score'] = bm25_score
                 
-                # 정규화 (벡터 점수: 0~1, BM25 점수: 0~1)
+                # 정규화
                 normalized_vector = max(0, min(1, result['vector_score']))
                 normalized_bm25 = max(0, min(1, bm25_score))
                 
                 result['hybrid_score'] = (0.7 * normalized_vector) + (0.3 * normalized_bm25)
             
-            # 하이브리드 점수 기준 정렬
+            # [Step 4] Hybrid 점수로 정렬
             vector_scores.sort(key=lambda x: x['hybrid_score'], reverse=True)
+            logger.info(f'✅ Hybrid Search: {search_k}개 후보 추출')
             
-            logger.debug(f'하이브리드 검색 완료: {query} (상위 {top_k}개)')
-            return vector_scores[:top_k]
+            # [Step 5] ✅ Reranking (선택사항)
+            if self.ranker is not None and len(vector_scores) > 0:
+                logger.info(f'⏳ Reranking 시작: {query} ({len(vector_scores)}개 후보)')
+                
+                try:
+                    # FlashRank 포맷: [{"id": "...", "text": "...", "meta": {...}}]
+                    passages = [
+                        {
+                            "id": r['id'],
+                            "text": r['content'],
+                            "meta": r.get('metadata', {})
+                        }
+                        for r in vector_scores
+                    ]
+                    
+                    # Reranking 실행
+                    ranked = self.ranker.rank(query, passages, top_k=top_k)
+                    
+                    # Reranked 결과를 원본 포맷으로 변환
+                    reranked_results = []
+                    for rank_idx, ranked_item in enumerate(ranked):
+                        # 원본 결과에서 찾기
+                        for orig in vector_scores:
+                            if orig['id'] == ranked_item['id']:
+                                reranked_results.append({
+                                    **orig,
+                                    'reranker_score': float(ranked_item['score']),
+                                    'reranker_rank': rank_idx + 1
+                                })
+                                break
+                    
+                    logger.info(f'✅ Reranking 완료: 상위 {len(reranked_results)}개 (1위 점수: {reranked_results[0]["reranker_score"]:.4f})')
+                    return reranked_results
+                    
+                except Exception as e:
+                    logger.warning(f'⚠️  Reranking 오류 (Hybrid 결과로 폴백): {str(e)}')
+                    return vector_scores[:top_k]
+            else:
+                # Reranker 없으면 Hybrid 결과만 반환
+                logger.info(f'ℹ️  Reranker 미사용: Hybrid 결과 직접 반환')
+                return vector_scores[:top_k]
             
         except Exception as e:
-            logger.error(f'하이브리드 검색 실패: {str(e)}')
+            logger.error(f'❌ 검색 실패: {str(e)}')
             return []
     
     def _calculate_bm25_scores(

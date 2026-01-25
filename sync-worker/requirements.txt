@@ -22,6 +22,9 @@ chromadb>=0.5.0
 sentence-transformers>=3.0.0
 huggingface-hub>=0.21.0
 
+# ✅ [Reranking] 정밀한 문서 순위화를 위한 가벼운 Reranker
+flashrank>=0.2.0
+
 # Notion Integration
 notion-client==2.2.1
 markdown==3.5.1

@@ -41,8 +41,9 @@ class SyncWorker:
         # 환경변수 로드
         self.notion_token = os.getenv('NOTION_TOKEN')
         self.notion_database_id = os.getenv('NOTION_DATABASE_ID') or None  # 빈 문자열을 None으로 변환
-        self.gitea_url = os.getenv('GITEA_URL')
-        self.gitea_token = os.getenv('GITEA_TOKEN')
+        # ✅ GITEA_URL이 None이거나 빈 문자열이면 None으로 통일
+        self.gitea_url = os.getenv('GITEA_URL') or None
+        self.gitea_token = os.getenv('GITEA_TOKEN') or None
         self.github_token = os.getenv('GITHUB_TOKEN', '').strip()
         self.github_orgs = [org.strip() for org in os.getenv('GITHUB_ORGS', '').split(',') if org.strip()]
         self.github_include_user = os.getenv('GITHUB_INCLUDE_USER_REPOS', 'true').lower() == 'true'

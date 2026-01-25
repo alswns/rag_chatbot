@@ -100,11 +100,14 @@ services:
 
     restart: unless-stopped
 
+    # ✅ [Hotfix] chromadb API v2 heartbeat 엔드포인트 사용
+    # 최신 chromadb는 /api/v2/heartbeat를 사용함
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
       interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 15
+      start_period: 30s
 
   # ==================== RAG API Server ====================
   rag-api:
@@ -147,8 +150,8 @@ services:
     networks:
       - rag-network
 
-    # ✅ [Chief Cloud Architect] vLLM 모델 로딩 완료 후 실행
-    # 이 설정이 없으면 vLLM 준비 전에 API 서버가 부팅되어 오류 발생
+    # ✅ [Chief Cloud Architect] vLLM + ChromaDB 모두 준비 후 실행
+    # 이 설정이 없으면 의존성 미충족으로 서버가 오류 발생하거나 무한 대기
     depends_on:
       vllm:
         condition: service_healthy
@@ -252,12 +255,12 @@ services:
       - CHROMA_HOST=chromadb
       - CHROMA_PORT=8000
 
+      # ✅ [Hotfix] 선택적 환경변수에 기본값 설정 (None 에러 방지)
       # Notion (선택사항)
       - NOTION_TOKEN=${NOTION_TOKEN:-}
       - NOTION_DATABASE_ID=${NOTION_DATABASE_ID:-}
 
       # Gitea (선택사항)
-      # ✅ 비활성화 시 빈 문자열로 두기 (기본값: 빈 문자열)
       - GITEA_URL=${GITEA_URL:-}
       - GITEA_TOKEN=${GITEA_TOKEN:-}
       - TARGET_REPOS=${TARGET_REPOS:-}
@@ -276,10 +279,6 @@ services:
 
     networks:
       - rag-network
-
-    depends_on:
-      chromadb:
-        condition: service_healthy
 
     restart: unless-stopped
 

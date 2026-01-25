@@ -107,61 +107,38 @@ class VectorSearchManager:
     @staticmethod
     def search(query: str, top_k: int = SEARCH_TOP_K) -> str:
         """
-        벡터 DB에서 관련 문서 검색
+        ✅ [Full Page Retrieval 적용] 벡터 DB에서 관련 문서 검색
+        
+        페이지 전체 문맥을 복원하여 반환합니다.
         
         Args:
             query: 검색 질문
-            top_k: 상위 K개 결과
+            top_k: 힌트가 될 조각 개수 (전체 페이지를 다 가져오므로 2-3개로 충분)
         
         Returns:
-            XML 포맷의 Context 문서
+            마크다운 형식의 컨텍스트 (페이지 전체 복원됨)
         """
         if vector_store is None:
             logger.warning('❌ Vector Store 미초기화')
-            return "<documents></documents>"
+            return ""
         
         try:
-            logger.info(f'🔍 검색: "{query[:50]}..." (top_k={top_k})')
+            logger.info(f'🔍 페이지 전체 검색 시작: "{query[:50]}..." (top_k={top_k})')
             
-            # ChromaDB 검색
-            search_results = vector_store.search(query, top_k=top_k)
-            if not search_results:
+            # ✅ retrieve_context: 조각을 찾고 페이지 전체를 복원하여 반환
+            context = vector_store.retrieve_context(query, top_k=top_k, use_hybrid=True)
+            
+            if not context:
                 logger.info('⚠️  검색 결과 없음')
-                return "<documents></documents>"
-            threshold = float(os.getenv('SIMILARITY_THRESHOLD', '0.3'))
-            for r in search_results:
-                logger.info(f'문서 ID: {r["id"]}, 유사도: {r["vector_score"]:.4f}')
-            # 유사도 필터링 (0.4 이상만 포함)
-            filtered_results = [
-                r for r in search_results
-                if r.get('vector_score', float('inf')) >= threshold
-            ]
+                return ""
             
-            if not filtered_results:
-                logger.info('⚠️  필터링 후 결과 없음')
-                return "<documents></documents>"
-            
-            # XML 포맷 Context 생성
-            context_parts = []
-            for i, result in enumerate(filtered_results, 1):
-                content = result['content']
-                source = result['metadata'].get('source', 'unknown')
-                
-                context_parts.append(f"""    <doc id="{i}">
-        <source>{source}</source>
-        <content>{content}</content>
-    </doc>""")
-            
-            context = "<documents>\n" + "\n".join(context_parts) + "\n</documents>"
-            
-            logger.info(f'✅ {len(filtered_results)}개 문서 검색 완료')
-            logger.debug(f'Context 길이: {len(context)}자')
+            logger.info(f'✅ 컨텍스트 생성 완료: {len(context)}자')
             
             return context
             
         except Exception as e:
-            logger.error(f'❌ 벡터 검색 실패: {str(e)}', exc_info=True)
-            return "<documents></documents>"
+            logger.error(f'❌ 페이지 검색 실패: {str(e)}', exc_info=True)
+            return ""
 
 
 # ==================== 2️⃣ 모델 관리 ====================

@@ -124,7 +124,7 @@ services:
       - LOG_LEVEL=INFO
 
       # RAG 검색 설정
-      - SEARCH_TOP_K=15
+      - SEARCH_TOP_K=2
 
     volumes:
       - ./sync-worker/src:/app/src

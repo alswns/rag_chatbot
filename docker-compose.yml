@@ -1,16 +1,21 @@
 version: "3.8"
 
+# AWS g5.xlarge Enterprise RAG System
+# Author: Chief Cloud Architect
+# Updated: 2026-01-25
+# Features:
+#   - vLLM with DeepSeek-R1 (NVIDIA GPU optimized)
+#   - ChromaDB Vector Store
+#   - Open WebUI for Interactive Chat
+#   - Ollama Backup (CPU fallback)
+
 services:
-  # vLLM Engine - GPU 최적화 LLM
+  # ==================== vLLM Engine (DeepSeek-R1 Optimized) ====================
   vllm:
     image: vllm/vllm-openai:latest
     container_name: rag-vllm
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./data/vllm-models:/root/.cache/huggingface
-    environment:
-      - HF_TOKEN=${HF_TOKEN}
+
+    # GPU 리소스 할당
     deploy:
       resources:
         reservations:
@@ -18,142 +23,287 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+        limits:
+          memory: 32G
+
+    # 환경변수
+    environment:
+      # GPU 메모리 최적화 (0.9 고정 - 0.95는 불안정)
+      - VLLM_GPU_MEMORY_UTILIZATION=0.9
+      # DeepSeek-R1 모델 설정
+      - LLM_MODEL_ID=${LLM_MODEL_ID:-unsloth/DeepSeek-R1-Distill-Qwen-14B-AWQ}
+      # vLLM 로깅
+      - VLLM_LOG_LEVEL=INFO
+
+    # 볼륨 마운트 (모델 캐시)
+    volumes:
+      - vllm-models:/root/.cache/huggingface
+      - vllm-cache:/tmp/vllm-cache
+
+    # 포트
+    ports:
+      - "8000:8000"
+
+    # vLLM API 시작 커맨드
+    # ✅ [Chief Cloud Architect] AWS g5.xlarge 최적화 옵션:
+    #   - --gpu-memory-utilization 0.9: GPU 메모리 최적화 (0.95는 시스템 불안정 유발)
+    #   - --max-model-len 8192: RAG Context 최대 토큰 (질의 + 검색 문서 통합)
+    #   - --enable-reasoning: DeepSeek-R1 추론 모드 활성화
+    #   - --reasoning-parser deepseek_r1: R1 특화 추론 파서
+    #   - --served-model-name: OpenAI 호환 API 응답 모델명
     command: >
-      serve "unsloth/DeepSeek-R1-Distill-Qwen-14B-AWQ"
+      serve "casperhansen/deepseek-r1-distill-qwen-14b-awq"
+      --host 0.0.0.0
       --port 8000
+      --served-model-name "DeepSeek-R1-Distill-Qwen-14B"
       --max-model-len 8192
-      --gpu-memory-utilization 0.9
+      --gpu-memory-utilization 0.90
       --trust-remote-code
       --quantization awq
       --dtype half
-      --enable-reasoning
-      --reasoning-parser deepseek_r1
-    restart: unless-stopped
-    networks:
-      - rag-network
-    # profiles 부분은 수동 실행이 필요하므로, 자동 실행을 원하시면 제거하세요.
+
+    # 헬스 체크 (모델 로딩 15GB ≈ 3-5분 소요)
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
+      interval: 10s
       timeout: 10s
-      retries: 5
-      start_period: 120s
+      retries: 30
+      start_period: 300s # ✅ 5분 대기 (모델 로딩 시간 확보)
 
-  # Ollama - CPU 최적화 LLM
-  ollama:
-    image: ollama/ollama:latest
-    container_name: rag-ollama
-    ports:
-      - "0.0.0.0:11434:11434" # ✅ 수정: 127.0.0.1 제거
-    volumes:
-      - ./data/ollama:/root/.ollama
-    environment:
-      - OLLAMA_HOST=0.0.0.0:11434
-      - OLLAMA_KEEP_ALIVE=0
-      - OLLAMA_NUM_PARALLEL=1
-      - OLLAMA_MEMORY_FRACTION=0.8
-    restart: unless-stopped
+    # 네트워크
     networks:
       - rag-network
-    entrypoint: /bin/bash -c "ollama serve & sleep 5 && ollama pull mistral && wait"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
-    profiles:
-      - ollama
 
-  # ChromaDB - Vector 데이터베이스
+    # 재시작 정책
+    restart: unless-stopped
+
+  # ==================== ChromaDB Vector Store ====================
   chromadb:
     image: chromadb/chroma:latest
     container_name: rag-chromadb
-    ports:
-      - "0.0.0.0:8001:8000" # ✅ 수정: 127.0.0.1 제거
+
+    environment:
+      # 데이터 영속성
+      - PERSIST_DIRECTORY=/chroma/data
+      - ANONYMIZED_TELEMETRY=false
+      - CHROMA_SERVER_AUTH_ENABLED=false
+
     volumes:
-      - ./data/chromadb:/chroma/chroma
-    environment:
-      - IS_PERSISTENT=TRUE
-      - PERSIST_DIRECTORY=/chroma/chroma
-      - ANONYMIZED_TELEMETRY=FALSE
-    restart: unless-stopped
-    networks:
-      - rag-network
+      # ✅ 벡터 DB 데이터 영속화
+      - chroma-data:/chroma/data
 
-  # Sync Worker - Notion/Gitea/GitHub 동기화
-  sync-worker:
-    build:
-      context: ./sync-worker
-      dockerfile: Dockerfile
-    container_name: rag-sync-worker
-    environment:
-      - PYTHONPATH=/app/src
-      - NOTION_TOKEN=${NOTION_TOKEN}
-      - NOTION_DATABASE_ID=${NOTION_DATABASE_ID}
-      - GITEA_URL=${GITEA_URL}
-      - GITEA_TOKEN=${GITEA_TOKEN}
-      - GITHUB_TOKEN=${GITHUB_TOKEN}
-      - GITHUB_ORGS=${GITHUB_ORGS}
-      - CHROMA_HOST=chromadb
-      - CHROMA_PORT=8000
-      - SYNC_INTERVAL=${SYNC_INTERVAL:-300}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - LLM_BACKEND=${LLM_BACKEND:-auto}
-    depends_on:
-      - chromadb
-    restart: unless-stopped
-    networks:
-      - rag-network
-
-  # RAG Inference API Server - FastAPI
-  rag-api:
-    build:
-      context: ./sync-worker
-      dockerfile: Dockerfile
-    container_name: rag-api-server
-    command: uvicorn src.server:app --host 0.0.0.0 --port 9000
     ports:
-      - "0.0.0.0:9000:9000" # ✅ 수정: 127.0.0.1 제거
-    environment:
-      - PYTHONPATH=/app/src
-      - VLLM_API_URL=${VLLM_API_URL:-http://vllm:8000/v1}
-      - OLLAMA_API_URL=${OLLAMA_API_URL:-http://ollama:11434}
-      - LLM_BACKEND=${LLM_BACKEND:-vllm} # ✅ auto → vllm으로 변경 (기본값)
-      - CHROMA_HOST=chromadb
-      - CHROMA_PORT=8000
-      - SEARCH_TOP_K=${SEARCH_TOP_K:-5}
-      - SERVER_HOST=0.0.0.0
-      - SERVER_PORT=9000
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-    depends_on:
-      - chromadb
-    restart: unless-stopped
+      - "8001:8000"
+
     networks:
       - rag-network
 
-  # Open WebUI - RAG 웹 인터페이스
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==================== RAG API Server ====================
+  rag-api:
+    # ✅ [Chief Cloud Architect] 빌드 캐시 활용을 위해 이미지명 통일
+    image: rag-backend:latest
+    container_name: rag-api
+
+    build:
+      # Dockerfile 위치 (sync-worker와 동일)
+      context: ./sync-worker
+      dockerfile: Dockerfile
+      cache_from:
+        - rag-backend:latest
+
+    environment:
+      # LLM 설정
+      - LLM_BACKEND=vllm
+      - VLLM_API_URL=http://vllm:8000/v1
+      # ✅ docker-compose 환경변수 반영
+      - LLM_MODEL_ID=${LLM_MODEL_ID:-unsloth/DeepSeek-R1-Distill-Qwen-14B-AWQ}
+
+      # ChromaDB 설정
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+
+      # 서버 설정
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8010
+      - LOG_LEVEL=INFO
+
+      # RAG 검색 설정
+      - SEARCH_TOP_K=5
+
+    volumes:
+      - ./sync-worker/src:/app/src
+
+    ports:
+      - "8010:8010"
+
+    networks:
+      - rag-network
+
+    # ✅ [Chief Cloud Architect] vLLM 모델 로딩 완료 후 실행
+    # 이 설정이 없으면 vLLM 준비 전에 API 서버가 부팅되어 오류 발생
+    depends_on:
+      vllm:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==================== Open WebUI (Interactive Chat) ====================
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     container_name: rag-webui
-    ports:
-      - "0.0.0.0:3000:8080"
-    volumes:
-      - ./data/open-webui:/app/backend/data
-    environment:
-      # ✅ 이 부분이 중요!
-      - OPENAI_API_BASE_URL=http://rag-api:9000/v1
-      - OPENAI_API_KEY=sk-default
-      - WEBUI_AUTH=false
-      - WEBUI_TRUSTED_HEADER_AUTH_ENABLED=false
 
-    restart: unless-stopped
+    environment:
+      # ✅ [Chief Cloud Architect] 기본 모델을 DeepSeek-R1로 설정
+      # 사용자가 모델 선택 없이 바로 대화 가능
+      - DEFAULT_MODEL=DeepSeek-R1-Distill-Qwen-14B
+
+      # RAG API 연결
+      - OPENAI_API_BASE_URL=http://rag-api:8010/v1
+      - OPENAI_API_KEY=sk-not-needed # Dummy key (로컬 API)
+
+      # 웹UI 설정
+      - WEBUI_NAME="Enterprise RAG Chat"
+      - WEBUI_URL=http://localhost:3000
+
+      # 보안
+      - SCOPED_FILE_UPLOAD_MAX_SIZE_MB=100
+      - ENABLE_OAUTH_SIGNUP=false
+
+    volumes:
+      # WebUI 설정 및 대화 히스토리 영속화
+      - webui-data:/app/backend/data
+
+    ports:
+      - "3000:8080"
+
     networks:
       - rag-network
 
+    depends_on:
+      rag-api:
+        condition: service_healthy
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==================== Ollama (CPU Backup) ====================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: rag-ollama
+
+    # ✅ [Chief Cloud Architect] profiles로 필요시에만 실행
+    # 평소에는 비활성화하여 CPU 자원 절약
+    # 활성화: docker-compose --profile ollama-backup up
+    profiles: ["ollama-backup"]
+
+    environment:
+      - OLLAMA_MODELS=/root/.ollama/models
+
+    volumes:
+      - ollama-models:/root/.ollama
+
+    ports:
+      - "11434:11434"
+
+    networks:
+      - rag-network
+
+    restart: unless-stopped
+
+  # ==================== Sync Worker (데이터 동기화) ====================
+  sync-worker:
+    # ✅ rag-api와 동일한 이미지 사용 (빌드 캐시 활용)
+    image: rag-backend:latest
+    container_name: rag-sync
+
+    build:
+      context: ./sync-worker
+      dockerfile: Dockerfile
+      cache_from:
+        - rag-backend:latest
+
+    environment:
+      # LLM 설정
+      - LLM_BACKEND=vllm
+      - VLLM_API_URL=http://vllm:8000/v1
+
+      # ChromaDB
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+
+      # Notion (선택사항)
+      - NOTION_TOKEN=${NOTION_TOKEN:-}
+      - NOTION_DATABASE_ID=${NOTION_DATABASE_ID:-}
+
+      # Gitea (선택사항)
+      - GITEA_URL=${GITEA_URL:-http://gitea:3000}
+      - GITEA_TOKEN=${GITEA_TOKEN:-}
+      - TARGET_REPOS=${TARGET_REPOS:-}
+
+      # GitHub (선택사항)
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_ORGS=${GITHUB_ORGS:-}
+
+      # 동기화 설정
+      - SYNC_INTERVAL=3600 # 1시간마다 동기화
+      - LOG_LEVEL=INFO
+
+    volumes:
+      - ./sync-worker/src:/app/src
+      - ./data:/app/data
+
+    networks:
+      - rag-network
+
+    depends_on:
+      chromadb:
+        condition: service_healthy
+
+    restart: unless-stopped
+
+# ==================== 네트워크 ====================
 networks:
   rag-network:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.28.0.0/16
+
+# ==================== 볼륨 ====================
+volumes:
+  # vLLM 모델 캐시 (약 15GB - DeepSeek-R1)
+  vllm-models:
+    driver: local
+
+  vllm-cache:
+    driver: local
+
+  # ChromaDB 벡터 데이터베이스
+  chroma-data:
+    driver: local
+
+  # Open WebUI 설정 및 대화 히스토리
+  webui-data:
+    driver: local
+
+  # Ollama 모델 (CPU fallback용)
+  ollama-models:
+    driver: local

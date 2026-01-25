@@ -48,8 +48,8 @@ services:
       --host 0.0.0.0
       --port 8000
       --served-model-name DeepSeek-R1-Distill-Qwen-14B
-      --max-model-len 8192
-      --gpu-memory-utilization 0.9
+      --max-model-len 4096
+      --gpu-memory-utilization 0.85
       --trust-remote-code
       --quantization awq
       --dtype half
@@ -167,7 +167,10 @@ services:
 
       # ✅ [Hotfix] 모델 필터 비활성화하여 RAG API 모델 자동 감지
       # ENABLE_MODEL_FILTER=false로 모든 모델을 Open WebUI에서 표시
-      - ENABLE_MODEL_FILTER=false
+      - ENABLE_MODEL_FILTER=true
+      - MODEL_FILTER_LIST = DeepSeek-R1-Distill-Qwen-14B
+      - ENABLE_MODEL_CHANGER = false
+      - SHOW_ADMIN_DETAILS = false
 
       # ✅ [Hotfix] OpenAI API 호환성 강화
       # ENABLE_OLLAMA_API=false로 Local Ollama 비활성화 (RAG API만 사용)

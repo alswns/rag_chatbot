@@ -420,7 +420,8 @@ async def list_models() -> Dict:
     
     return {
         'object': 'list',
-        'data': models
+        # 'data': models
+        "data": [{"id": "DeepSeek-R1-Distill-Qwen-14B", "object": "model"}]
     }
 
 

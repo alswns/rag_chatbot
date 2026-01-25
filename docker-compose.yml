@@ -125,15 +125,7 @@ services:
 
       # RAG 검색 설정
       - SEARCH_TOP_K=15
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-        limits:
-          memory: 32G
+
     volumes:
       - ./sync-worker/src:/app/src
 
@@ -254,15 +246,6 @@ services:
       dockerfile: Dockerfile
       cache_from:
         - rag-backend:latest
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-        limits:
-          memory: 32G
 
     environment:
       # LLM 설정

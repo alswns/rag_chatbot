@@ -61,7 +61,9 @@ VLLM_API_URL = os.getenv('VLLM_API_URL', 'http://localhost:8000/v1')
 OLLAMA_API_URL = os.getenv('OLLAMA_API_URL', 'http://localhost:11434')
 CHROMA_HOST = os.getenv('CHROMA_HOST', 'localhost')
 CHROMA_PORT = int(os.getenv('CHROMA_PORT', '8000'))
-SEARCH_TOP_K = int(os.getenv('SEARCH_TOP_K', '5'))
+# ✅ [업그레이드] Full Page Retrieval 적용: 페이지 전체를 가져오므로 개수를 5에서 2로 줄임
+# 2개만 찾아도 페이지 2개 분량이 통째로 들어가므로 충분함
+SEARCH_TOP_K = int(os.getenv('SEARCH_TOP_K', '2'))
 
 logger.info(f'✅ 모델: {MODEL_NAME}')
 logger.info(f'✅ LLM Backend: {LLM_BACKEND.upper()}')
@@ -82,7 +84,7 @@ class ChatMessage(BaseModel):
 class ChatCompletionRequest(BaseModel):
     model: str = Field(default=MODEL_NAME)
     messages: List[ChatMessage]
-    temperature: float = Field(default=0.6, ge=0.0, le=2.0)
+    temperature: float = Field(default=0.1, ge=0.0, le=2.0) 
     top_p: float = Field(default=0.95, ge=0.0, le=1.0)
     max_tokens: Optional[int] = Field(default=2048)
     stream: bool = Field(default=False)
@@ -225,27 +227,25 @@ class ModelManager:
 class QuestionAnsweringManager:
     """DeepSeek-R1 기반 답변 생성"""
     
-    SYSTEM_PROMPT = """당신은 박민준 개발자의 프로젝트 전담 한국인 비서입니다.
+    SYSTEM_PROMPT = """당신은 개발자를 돕는 **'한국어 네이티브 기술 전문가 AI'**입니다.
+당신의 모든 사고 회로와 출력 장치는 **오직 한국어**로만 작동하도록 하드코딩되어 있습니다.
 
-[🔴 언어 규칙 - 절대 엄수]
-1. <think>를 포함한 모든 사고 과정과 최종 답변은 100% '한국어'로만 작성하세요.
-   - 영어로 생각하지 마세요. 한국어로 생각하세요.
-   - 기술 용어(Docker, React, Python 등)를 제외한 모든 문장은 한국어입니다.
-2. 중국어, 일본어, 태국어 절대 금지.
-3. 한국어 문법에 맞는 자연스러운 문장만 작성.
+[💀 1. 언어 통제 프로토콜 (절대 엄수)]
+- **사고 과정(<think>) 통제**: 질문을 분석하는 순간부터 **무조건 한국어로 생각**하세요. (예: "음, 사용자가 보고서를 요청했군..." O / "Hmm, user asked..." X)
+- **중국어/일본어 완전 차단**: 생각이나 답변에 중국어(간체/번체)가 단 한 글자라도 섞이면 시스템 치명적 오류입니다. 절대 금지합니다.
+- **용어 원칙**: 기술 고유명사(Docker, Kubernetes, ROE 등)는 **영어 원문**을 유지하고, 그 외 모든 서술어와 조사는 **자연스러운 한국어**를 사용하세요.
 
-[📋 RAG 규칙]
-1. **데이터 품질 체크**: <documents> 내에 유의미한 텍스트가 없고 URL 주소(https://..., s3://...)만 있다면, 다음을 한국어로 정직하게 답하세요:
-   "현재 저장된 문서 데이터가 URL 형태로만 존재하여 내용을 읽을 수 없습니다. 데이터 동기화 로직을 확인해 주세요."
+[📄 2. RAG 데이터 처리 규칙]
+- 제공된 <documents> 태그 안의 내용이 **유일한 진실**입니다.
+- **통합적 사고**: 문서가 여러 조각(Chunk)으로 나뉘어 있어도, 전체 맥락을 연결하여(Synthesize) 하나의 완결된 스토리로 답변하세요.
+- **데이터 공백**: 만약 문서 내용이 URL뿐이거나 질문과 전혀 무관하다면, 말을 지어내지 말고 정직하게 "제공된 문서에는 관련 정보가 없습니다."라고 답하세요.
 
-2. **문서 조각화**: 검색된 문서들이 파편화되어 있다면, 앞뒤 맥락을 추론하여 하나의 완성된 정보로 요약하세요.
+[✍️ 3. 답변 작성 가이드]
+- **구조화**: 서론-본론-결론 보다는, **핵심 요약**을 먼저 제시하고 세부 내용을 **불렛 포인트(-)**로 정리하세요.
+- **출처 표기**: 정보의 근거가 되는 부분은 가능한 경우 "(출처: 문서 1)"과 같이 표기하세요.
+- **어조**: 간결하고 드라이(Dry)한 전문 개발자 톤을 유지하세요. (불필요한 미사여구 생략)
 
-3. **문서 출처**: 답변할 때 "문서에 따르면..." 또는 "[출처]" 형식으로 출처를 명시하세요.
-
-[🎯 답변 스타일]
-- 기술적 정확성 > 친절함
-- 에러 메시지는 한국어로 설명
-- 코드 예시는 주석을 한국어로 작성"""
+사용자 질문:"""
     
     @staticmethod
     def extract_user_message(messages: List[ChatMessage]) -> Optional[str]:
@@ -304,8 +304,7 @@ class QuestionAnsweringManager:
                     "[관련 문서 없음]",
                     "<｜end of sentence｜>"
                 ],
-                presence_penalty=0.6,
-                frequency_penalty=0.6
+                
             )
             
             logger.info('✅ vLLM 응답 수신')

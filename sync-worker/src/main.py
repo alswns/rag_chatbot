@@ -6,6 +6,8 @@ ChromaDB 벡터 데이터베이스에 저장합니다.
 """
 
 import os
+import sys
+import argparse
 import logging
 from datetime import datetime
 import time
@@ -14,6 +16,7 @@ from dotenv import load_dotenv
 # 로컬 모듈 임포트
 from connectors import NotionConnector, GiteaConnector, GitHubConnector
 from processors import ChunkingProcessor
+from processors.pipeline import GraphRAGPipeline
 from db import VectorStoreManager
 from utils import SyncStateManager
 
@@ -27,6 +30,10 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# 글로벌 설정
+RELATION_COLUMN_NAME = os.getenv('NOTION_RELATION_COLUMN', '작업')  # 관계형 컬럼명
+EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'BAAI/bge-m3')  # 임베딩 모델
 
 
 class SyncWorker:
@@ -53,7 +60,6 @@ class SyncWorker:
         
         self.chroma_host = os.getenv('CHROMA_HOST', 'localhost')
         self.chroma_port = int(os.getenv('CHROMA_PORT', '8000'))
-        self.sync_interval = int(os.getenv('SYNC_INTERVAL', '300'))
         
         # 컴포넌트 초기화
         try:
@@ -105,6 +111,20 @@ class SyncWorker:
             self.chunking_processor = ChunkingProcessor()
             logger.info('✓ ChunkingProcessor 초기화 완료')
             
+            # Graph RAG 파이프라인 (Notion 기반)
+            if self.notion_token:
+                self.graph_rag_pipeline = GraphRAGPipeline(
+                    notion_token=self.notion_token,
+                    chroma_host=self.chroma_host,
+                    chroma_port=self.chroma_port,
+                    max_chunk_tokens=512,
+                    traversal_depth=2
+                )
+                logger.info('✓ GraphRAGPipeline 초기화 완료')
+            else:
+                self.graph_rag_pipeline = None
+                logger.info('⊘ Notion 토큰 미설정 - Graph RAG 파이프라인 비활성화')
+            
         except Exception as e:
             logger.error(f'초기화 실패: {str(e)}')
             raise
@@ -115,24 +135,80 @@ class SyncWorker:
     
     def sync_notion(self) -> int:
         """
-        Notion 데이터베이스 동기화
+        Notion 데이터베이스 동기화 (Graph RAG 파이프라인 사용)
         
-        - 마지막 동기화 시간 이후 변경된 페이지 조회
-        - 페이지마다 청킹 후 즉시 저장 (스트리밍 방식)
-        - ChromaDB에 저장 (기존 데이터는 먼저 삭제)
+        - Graph RAG 파이프라인으로 Notion 문서 추출
+        - NetworkX 그래프 구축 ("작업" 관계 + parent 계층)
+        - Lazy Loading을 통한 메모리 최적화
+        - ChromaDB에 저장
+        
+        Returns:
+            동기화된 문서 개수
+        """
+        logger.info('[Notion Graph RAG] 동기화 시작...')
+        
+        try:
+            # Graph RAG 파이프라인이 없으면 기존 방식으로 폴백
+            if not self.graph_rag_pipeline:
+                logger.warning('[Notion] Graph RAG 파이프라인 미활성화 - 기존 방식으로 동기화')
+                return self._sync_notion_legacy()
+            
+            # ✅ Delta Sync: 마지막 동기화 시간 조회
+            last_sync_time = self.sync_state.get_last_sync_time('notion')
+            if last_sync_time:
+                logger.info(f'[Notion] Delta Sync 모드 - 마지막 동기화: {last_sync_time}')
+            else:
+                logger.info('[Notion] Full Sync 모드 - 첫 동기화')
+            
+            # Graph RAG 파이프라인 실행 (Delta Sync 적용)
+            logger.info('[Notion Graph RAG] 파이프라인 실행 중...')
+            result = self.graph_rag_pipeline.run_full_pipeline(
+                last_sync_time=last_sync_time  # ✅ Delta Sync 시간 전달
+            )
+            
+            if result.get('status') == 'success':
+                stored_count = result.get('stored_count', 0)
+                nodes_count = result.get('nodes_count', 0)
+                edges_count = result.get('edges_count', 0)
+                
+                logger.info('[Notion Graph RAG] 동기화 완료')
+                logger.info(f'  • 문서: {result.get("documents_count", 0)}개')
+                logger.info(f'  • 노드: {nodes_count}개')
+                logger.info(f'  • 엣지: {edges_count}개')
+                logger.info(f'  • 저장됨: {stored_count}개')
+                
+                # 마지막 동기화 시간 업데이트
+                self.sync_state.set_last_sync_time('notion')
+                
+                return stored_count
+            else:
+                logger.error(f'[Notion Graph RAG] 파이프라인 실패: {result.get("message")}')
+                return 0
+            
+        except Exception as e:
+            logger.error(f'[Notion Graph RAG] 동기화 중 오류: {str(e)}', exc_info=True)
+            logger.info('[Notion] 기존 방식으로 폴백...')
+            try:
+                return self._sync_notion_legacy()
+            except Exception as fallback_error:
+                logger.error(f'[Notion] 기존 방식도 실패: {str(fallback_error)}')
+                return 0
+    
+    def _sync_notion_legacy(self) -> int:
+        """
+        Notion 데이터베이스 동기화 (기존 청킹 방식 - 폴백용)
         
         Returns:
             동기화된 청크 개수
         """
-        logger.info('[Notion] 동기화 시작...')
+        logger.info('[Notion Legacy] 기존 청킹 방식으로 동기화 중...')
         
         try:
             # 마지막 동기화 시간 조회
             last_sync_time = self.sync_state.get_last_sync_time('notion')
             logger.info(f'[Notion] 마지막 동기화: {last_sync_time or "없음 (처음 동기화)"}')
             
-            # 변경된 페이지 조회 및 처리 (Delta Sync)
-            # 즉시 저장하기 위해 제너레이터 사용
+            # 변경된 페이지 조회 및 처리
             total_chunks = 0
             processed_pages = set()
             
@@ -144,21 +220,17 @@ class SyncWorker:
                 if not page_chunks:
                     continue
                 
-                # 페이지별 청크가 완성되었을 때 즉시 저장
                 source = page_chunks[0]['metadata'].get('source')
                 
-                # 기존 데이터 삭제 (중복 방지)
-                if source and source not in processed_pages:
-                    deleted_count = self.vector_store.delete_by_source(source)
-                    if deleted_count > 0:
-                        logger.debug(f'[Notion] 기존 데이터 삭제: {source} ({deleted_count}개)')
-                    processed_pages.add(source)
+                # 중복 처리 방지 (삭제 없이 skip)
+                if source and source in processed_pages:
+                    continue
+                processed_pages.add(source)
                 
                 # 페이지의 청크들을 즉시 저장
                 added_count = self.vector_store.add_documents(page_chunks)
                 total_chunks += added_count
                 
-                # 페이지 타이틀 로깅
                 page_title = page_chunks[0]['metadata'].get('title', 'Untitled')
                 logger.info(f'✓ 페이지 저장 완료: {page_title} ({len(page_chunks)}개 청크)')
             
@@ -166,14 +238,14 @@ class SyncWorker:
             self.sync_state.set_last_sync_time('notion')
             
             if total_chunks == 0:
-                logger.info('[Notion] 변경된 페이지 또는 청크 없음')
+                logger.info('[Notion Legacy] 변경된 페이지 또는 청크 없음')
             else:
-                logger.info(f'[Notion] 동기화 완료 (총 {total_chunks}개 청크)')
+                logger.info(f'[Notion Legacy] 동기화 완료 (총 {total_chunks}개 청크)')
             
             return total_chunks
             
         except Exception as e:
-            logger.error(f'[Notion] 동기화 중 오류: {str(e)}', exc_info=True)
+            logger.error(f'[Notion Legacy] 동기화 중 오류: {str(e)}', exc_info=True)
             return 0
     
     def sync_gitea(self) -> int:
@@ -211,12 +283,7 @@ class SyncWorker:
                     logger.warning(f'[Gitea] 생성된 청크 없음: {repo_path}')
                     continue
                 
-                # 기존 데이터 삭제 (중복 방지)
-                deleted_count = self.vector_store.delete_by_source(repo_url)
-                if deleted_count > 0:
-                    logger.debug(f'[Gitea] 기존 데이터 삭제: {repo_path} ({deleted_count}개)')
-                
-                # ChromaDB에 저장
+                # ChromaDB에 저장 (upsert 방식으로 중복 처리)
                 added_count = self.vector_store.add_documents(documents)
                 total_chunks += added_count
                 
@@ -286,10 +353,7 @@ class SyncWorker:
                 logger.info('[GitHub] 조회된 저장소 없음')
                 return 0
             
-            # 기존 GitHub 데이터 삭제
-            self.vector_store.delete_by_source('github')
-            
-            # 저장소별 처리
+            # 저장소별 처리 (삭제 없이 upsert 방식)
             for repo in repos:
                 try:
                     repo_name = repo['full_name']
@@ -336,117 +400,143 @@ class SyncWorker:
             logger.error(f'통계 출력 실패: {str(e)}')
     
     def run(self) -> None:
-        """메인 루프 - 주기적으로 동기화"""
-        logger.info(f'Sync Worker 시작 (동기화 주기: {self.sync_interval}초)')
-        
-        cycle_count = 0
-        
-        while True:
-            cycle_count += 1
+        """일회성 동기화 - 한 번만 실행 후 종료"""
+        try:
+            start_time = datetime.now()
+            logger.info('=' * 70)
+            logger.info(f'Sync Worker 실행 시작: {start_time.isoformat()}')
+            logger.info('=' * 70)
             
+            notion_chunks = 0
             try:
-                start_time = datetime.now()
-                logger.info('=' * 70)
-                logger.info(f'[사이클 #{cycle_count}] 동기화 시작: {start_time.isoformat()}')
-                logger.info('=' * 70)
-                
-                notion_chunks = 0
-                try:
-                    logger.info('-' * 70)
-                    logger.info('Step 1: Notion 페이지 동기화')
-                    logger.info('-' * 70)
-                    notion_chunks = self.sync_notion()
-                except Exception as e:
-                    logger.error(f'Notion 동기화 실패: {str(e)}', exc_info=True)
-                
-
-                # 1. Gitea 저장소 동기화
-                gitea_chunks = 0
-                try:
-                    logger.info('-' * 70)
-                    logger.info('Step 2: Gitea 저장소 동기화')
-                    logger.info('-' * 70)
-                    gitea_chunks = self.sync_gitea()
-                except Exception as e:
-                    logger.error(f'Gitea 동기화 실패: {str(e)}', exc_info=True)
-                
-                # 2. GitHub 저장소 동기화
-                github_chunks = 0
-                try:
-                    logger.info('-' * 70)
-                    logger.info('Step 3: GitHub 저장소 동기화')
-                    logger.info('-' * 70)
-                    github_chunks = self.sync_github()
-                except Exception as e:
-                    logger.error(f'GitHub 동기화 실패: {str(e)}', exc_info=True)
-                
-                # 3. Notion 페이지 동기화
-                
-                # 통계 출력
-                try:
-                    logger.info('-' * 70)
-                    logger.info('벡터 저장소 통계')
-                    logger.info('-' * 70)
-                    self.print_stats()
-                except Exception as e:
-                    logger.error(f'통계 출력 실패: {str(e)}')
-                
-                # 소요 시간 계산
-                end_time = datetime.now()
-                elapsed = (end_time - start_time).total_seconds()
-                
-                logger.info('=' * 70)
-                logger.info(f'[사이클 #{cycle_count}] 동기화 완료')
-                logger.info(f'  • Gitea: {gitea_chunks}개 청크')
-                logger.info(f'  • GitHub: {github_chunks}개 청크')
-                logger.info(f'  • Notion: {notion_chunks}개 청크')
-                logger.info(f'  • 총 처리: {gitea_chunks + github_chunks + notion_chunks}개 청크')
-                logger.info(f'  • 소요시간: {elapsed:.2f}초')
-                logger.info('=' * 70)
-                
-                # 3. 다음 동기화까지 대기
-                remaining_time = self.sync_interval - elapsed
-                if remaining_time > 0:
-                    logger.info(f'{remaining_time:.0f}초 대기 중... (다음 동기화: {(end_time.timestamp() + remaining_time)})')
-                    time.sleep(remaining_time)
-                else:
-                    logger.warning(f'동기화 시간이 설정값({self.sync_interval}초)을 초과했습니다. 즉시 다음 동기화 실행')
-                
-            except KeyboardInterrupt:
-                logger.info('')
-                logger.info('=' * 70)
-                logger.info('Sync Worker 종료 (사용자 중단)')
-                logger.info('=' * 70)
-                break
-                
+                logger.info('-' * 70)
+                logger.info('Step 1: Notion 페이지 동기화')
+                logger.info('-' * 70)
+                notion_chunks = self.sync_notion()
             except Exception as e:
-                logger.error(f'[사이클 #{cycle_count}] 예상치 못한 오류: {str(e)}', exc_info=True)
-                logger.info('10초 후 재시도...')
-                time.sleep(10)
+                logger.error(f'Notion 동기화 실패: {str(e)}', exc_info=True)
+            
+            # Gitea 저장소 동기화
+            gitea_chunks = 0
+            try:
+                logger.info('-' * 70)
+                logger.info('Step 2: Gitea 저장소 동기화')
+                logger.info('-' * 70)
+                gitea_chunks = self.sync_gitea()
+            except Exception as e:
+                logger.error(f'Gitea 동기화 실패: {str(e)}', exc_info=True)
+            
+            # GitHub 저장소 동기화
+            github_chunks = 0
+            try:
+                logger.info('-' * 70)
+                logger.info('Step 3: GitHub 저장소 동기화')
+                logger.info('-' * 70)
+                github_chunks = self.sync_github()
+            except Exception as e:
+                logger.error(f'GitHub 동기화 실패: {str(e)}', exc_info=True)
+            
+            # 통계 출력
+            try:
+                logger.info('-' * 70)
+                logger.info('벡터 저장소 통계')
+                logger.info('-' * 70)
+                self.print_stats()
+            except Exception as e:
+                logger.error(f'통계 출력 실패: {str(e)}')
+            
+            # 소요 시간 계산
+            end_time = datetime.now()
+            elapsed = (end_time - start_time).total_seconds()
+            
+            logger.info('=' * 70)
+            logger.info('✅ 동기화 완료')
+            logger.info(f'  • Gitea: {gitea_chunks}개 청크')
+            logger.info(f'  • GitHub: {github_chunks}개 청크')
+            logger.info(f'  • Notion: {notion_chunks}개 청크')
+            logger.info(f'  • 총 처리: {gitea_chunks + github_chunks + notion_chunks}개 청크')
+            logger.info(f'  • 소요시간: {elapsed:.2f}초')
+            logger.info('=' * 70)
+            
+        except Exception as e:
+            logger.error(f'동기화 실패: {str(e)}', exc_info=True)
+    
+    def run_once(self) -> None:
+        """단일 동기화 실행 (배치 작업용)"""
+        logger.info('Sync Worker 단일 실행 모드')
+        
+        try:
+            start_time = datetime.now()
+            logger.info('=' * 70)
+            logger.info(f'[단일 실행] 동기화 시작: {start_time.isoformat()}')
+            logger.info('=' * 70)
+            
+            # Notion 동기화
+            notion_chunks = 0
+            try:
+                logger.info('Notion 동기화 중...')
+                notion_chunks = self.sync_notion()
+            except Exception as e:
+                logger.error(f'Notion 동기화 실패: {str(e)}', exc_info=True)
+            
+            # 통계 출력
+            self.print_stats()
+            
+            # 소요 시간
+            end_time = datetime.now()
+            elapsed = (end_time - start_time).total_seconds()
+            
+            logger.info('=' * 70)
+            logger.info(f'[단일 실행] 동기화 완료')
+            logger.info(f'  • Notion: {notion_chunks}개')
+            logger.info(f'  • 소요시간: {elapsed:.2f}초')
+            logger.info('=' * 70)
+            
+        except Exception as e:
+            logger.error(f'단일 실행 실패: {str(e)}', exc_info=True)
+            raise
+
+
+def parse_args():
+    """명령줄 인자 파싱"""
+    parser = argparse.ArgumentParser(description='RAG Sync Worker')
+    parser.add_argument(
+        '--once',
+        action='store_true',
+        help='1회만 실행 후 종료 (배치 작업용)'
+    )
+    return parser.parse_args()
 
 
 if __name__ == '__main__':
+    args = parse_args()
+    sync_once = args.once or os.getenv('SYNC_ONCE', 'false').lower() == 'true'
+    
     try:
-        # 최대 3번 시도 (ChromaDB 준비 대기)
         max_retries = 3
         retry_count = 0
         
         while retry_count < max_retries:
             try:
                 worker = SyncWorker()
-                worker.run()
+                
+                if sync_once:
+                    worker.run_once()
+                else:
+                    worker.run()
                 break
+                
             except Exception as e:
                 retry_count += 1
                 if retry_count < max_retries:
-                    wait_time = 2 ** retry_count  # 지수 백오프: 2, 4, 8초
-                    logger.error(f'[시도 {retry_count}/{max_retries}] Sync Worker 초기화 실패: {str(e)}', exc_info=True)
+                    wait_time = 2 ** retry_count
+                    logger.error(f'[시도 {retry_count}/{max_retries}] 실패: {str(e)}', exc_info=True)
                     logger.info(f'{wait_time}초 후 재시도...')
                     time.sleep(wait_time)
                 else:
-                    logger.error(f'Sync Worker 최종 실패: {str(e)}', exc_info=True)
-                    exit(1)
+                    logger.error(f'최종 실패: {str(e)}', exc_info=True)
+                    sys.exit(1)
                     
     except Exception as e:
         logger.error(f'예상치 못한 오류: {str(e)}', exc_info=True)
-        exit(1)
+        sys.exit(1)

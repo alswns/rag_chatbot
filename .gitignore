@@ -49,4 +49,5 @@ logs/
 
 # Git
 .git/
-.gitkeep
+# sync-workers/models
+sync-worker/models

@@ -95,6 +95,74 @@ class NotionConnector:
             logger.warning('NOTION_TOKEN이 올바른지 확인하세요')
             return False
     
+    def build_full_page_map(self) -> Dict[str, Dict[str, Any]]:
+        """
+        ✅ [신규] 전체 페이지의 ID, Title, Parent_ID 맵 생성 (캐싱용)
+        
+        모든 페이지를 먼저 스캔하여 족보 지도(Dictionary)를 만듭니다.
+        이 맵을 사용하면 API 호출 없이 부모 경로를 추적할 수 있습니다.
+        
+        Returns:
+            {page_id: {'title': str, 'parent_id': str}} 딕셔너리
+        """
+        logger.info('🗺️ 전체 페이지 맵 구축 시작 (부모 경로 추적용)...')
+        
+        page_map = {}
+        has_more = True
+        start_cursor = None
+        page_count = 0
+        
+        try:
+            while has_more:
+                time.sleep(0.2)  # Rate Limit 방어
+                
+                search_params = {
+                    'filter': {'property': 'object', 'value': 'page'},
+                    'page_size': 100
+                }
+                if start_cursor:
+                    search_params['start_cursor'] = start_cursor
+                
+                response = self.client.search(**search_params)
+                
+                for page in response.get('results', []):
+                    page_id = page.get('id')
+                    if not page_id:
+                        continue
+                    
+                    # 제목 추출
+                    title = 'Untitled'
+                    props = page.get('properties', {})
+                    for prop_name, prop_value in props.items():
+                        if prop_value.get('type') == 'title':
+                            title_array = prop_value.get('title', [])
+                            if title_array:
+                                title = ''.join([t.get('plain_text', '') for t in title_array])
+                            break
+                    
+                    # 부모 ID 추출
+                    parent = page.get('parent', {})
+                    parent_id = parent.get('page_id') or parent.get('database_id')
+                    
+                    page_map[page_id] = {
+                        'title': title,
+                        'parent_id': parent_id
+                    }
+                    page_count += 1
+                
+                has_more = response.get('has_more', False)
+                start_cursor = response.get('next_cursor')
+                
+                if page_count % 100 == 0:
+                    logger.info(f'  📄 {page_count}개 페이지 맵 수집됨...')
+            
+            logger.info(f'✅ 전체 페이지 맵 구축 완료: {len(page_map)}개 페이지')
+            return page_map
+            
+        except Exception as e:
+            logger.error(f'페이지 맵 구축 실패: {str(e)}')
+            return page_map
+
     def get_updated_pages(self, last_sync_time: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         마지막 동기화 이후 변경된 페이지 조회 (Delta Sync)
@@ -140,7 +208,7 @@ class NotionConnector:
             last_sync_time: 마지막 동기화 시간 (이후 수정된 페이지만)
         
         Returns:
-            페이지 정보 리스트
+            페이지 정보 리스트 (properties, parent 포함)
         """
         pages_list = []
         has_more = True
@@ -168,32 +236,34 @@ class NotionConnector:
                     page_id = page['id']
                     last_edited = page.get('last_edited_time')
                     
-                    # last_sync_time 이후 수정된 페이지만 필터링
-                    if last_sync_time:
-                        if last_edited and last_edited > last_sync_time:
-                            page_info = {
-                                'page_id': page_id,
-                                'id': page_id,
-                                'title': page.get('title', [{}])[0].get('text', {}).get('content', 'Untitled') if page.get('title') else 'Untitled',
-                                'last_edited_time': last_edited,
-                                'created_time': page.get('created_time'),
-                                'content': None
-                            }
-                            pages_list.append(page_info)
-                            logger.debug(f"  ✓ {page_id} (수정: {last_edited})")
-                        else:
-                            logger.debug(f"  ✗ {page_id} (변경 없음 - {last_edited})")
-                    else:
-                        page_info = {
-                            'page_id': page_id,
-                            'id': page_id,
-                            'title': page.get('title', [{}])[0].get('text', {}).get('content', 'Untitled') if page.get('title') else 'Untitled',
-                            'last_edited_time': last_edited,
-                            'created_time': page.get('created_time'),
-                            'content': None
-                        }
-                        pages_list.append(page_info)
-                        logger.debug(f"  ✓ {page_id}")
+                    # last_sync_time 필터링
+                    if last_sync_time and last_edited and last_edited <= last_sync_time:
+                        logger.debug(f"  ✗ {page_id} (변경 없음 - {last_edited})")
+                        continue
+                    
+                    # title 추출 (Search API 응답 구조에 맞게)
+                    title = self._extract_title_from_search_result(page)
+                    
+                    # parent 정보 추출 (graph_rag 계층 구조용)
+                    parent = page.get('parent', {})
+                    parent_id = parent.get('page_id') or parent.get('database_id')
+                    
+                    # properties 추출 (graph_rag "작업" 관계 추출용)
+                    properties = page.get('properties', {})
+                    
+                    page_info = {
+                        'page_id': page_id,
+                        'id': page_id,
+                        'title': title,
+                        'last_edited_time': last_edited,
+                        'created_time': page.get('created_time'),
+                        'parent': parent,
+                        'parent_id': parent_id,
+                        'properties': properties,
+                        'content': None
+                    }
+                    pages_list.append(page_info)
+                    logger.debug(f"  ✓ {page_id} ({title})")
                 
                 has_more = response.get('has_more', False)
                 start_cursor = response.get('next_cursor')
@@ -217,7 +287,7 @@ class NotionConnector:
             last_sync_time: 마지막 동기화 시간
         
         Returns:
-            페이지 정보 리스트
+            페이지 정보 리스트 (properties, parent 포함)
         """
         pages_list = []
         has_more = True
@@ -252,13 +322,24 @@ class NotionConnector:
             
             # 페이지 정보 추출
             for page in response.get('results', []):
+                # parent 정보 추출 (graph_rag 계층 구조용)
+                parent = page.get('parent', {})
+                parent_id = parent.get('page_id') or parent.get('database_id')
+                
+                # properties 추출 (graph_rag "작업" 관계 추출용)
+                properties = page.get('properties', {})
+                
                 page_info = {
                     'page_id': page['id'],
+                    'id': page['id'],
                     'title': self._extract_title(page),
                     'last_edited_time': page['last_edited_time'],
                     'created_time': page['created_time'],
-                    'database_id': database_id,  # 어느 데이터베이스인지 추적
-                    'content': None  # content는 추후 fetch_page_content에서 설정
+                    'database_id': database_id,
+                    'parent': parent,
+                    'parent_id': parent_id,
+                    'properties': properties,
+                    'content': None
                 }
                 pages_list.append(page_info)
             
@@ -486,8 +567,8 @@ class NotionConnector:
             페이지 내용 (Markdown 형식)
         """
         try:
-            # 페이지 컨텐츠 블록 조회
-            blocks = self._get_page_blocks(page_id)
+            # ✅ [개선] 페이지 컨텐츠 블록 조회 (depth 추적)
+            blocks = self._get_page_blocks(page_id, depth=0)
             
             # 블록을 Markdown으로 변환
             markdown_content = self._blocks_to_markdown(blocks)
@@ -499,31 +580,63 @@ class NotionConnector:
             logger.error(f'페이지 컨텐츠 조회 실패 ({page_id}): {str(e)}')
             return ''
     
-    def _get_page_blocks(self, page_id: str, start_cursor: Optional[str] = None) -> List[Dict]:
-        """페이지의 모든 블록 재귀적으로 조회 (부모-자식 순서 유지)"""
+    def _get_page_blocks(self, page_id: str, start_cursor: Optional[str] = None, depth: int = 0) -> List[Dict]:
+        """
+        ✅ [최적화] 페이지의 모든 블록 재귀적으로 조회 (child_page/child_database 재귀 차단)
+        
+        Args:
+            page_id: 페이지/블록 ID
+            start_cursor: 페이지네이션 커서
+            depth: 현재 재귀 깊이 (들여쓰기용)
+        
+        Returns:
+            블록 리스트 (depth 정보 포함)
+        
+        최적화:
+        - child_page, child_database는 재귀 호출하지 않음 (링크로만 처리)
+        - 이를 통해 데이터 중복 방지 및 성능 대폭 향상
+        """
         all_blocks = []
         has_more = True
         cursor = start_cursor
         
+        # ✅ 최대 재귀 깊이 제한 (무한 루프 방지)
+        MAX_DEPTH = 5
+        if depth > MAX_DEPTH:
+            logger.warning(f'최대 재귀 깊이 초과 ({MAX_DEPTH}), 중단: {page_id}')
+            return []
+        
         try:
             while has_more:
+                # ✅ Rate Limit 방어
+                time.sleep(0.15)
+                
                 response = self.client.blocks.children.list(
                     block_id=page_id,
                     page_size=100,
                     start_cursor=cursor
                 )
                 
-                # 부모 블록과 자식 블록을 순차적으로 추가
                 for block in response.get('results', []):
+                    block_type = block.get('type')
+                    
+                    # ✅ depth 정보 추가 (마크다운 들여쓰기용)
+                    block['_depth'] = depth
                     all_blocks.append(block)
-                    # 해당 블록이 자식 블록을 가지면 재귀적으로 조회
+                    
+                    # ✅ [핵심 최적화] child_page, child_database는 재귀 호출 차단
+                    # 이들은 독립된 문서로 별도 수집됨 → 링크로만 처리
+                    if block_type in ('child_page', 'child_database'):
+                        logger.debug(f'  ↳ 하위 {block_type} 건너뜀 (별도 수집): {block.get("id")}')
+                        continue  # 재귀 호출 안 함
+                    
+                    # 그 외 블록(toggle, column, synced_block 등)은 재귀적으로 조회
                     if block.get('has_children'):
-                        child_blocks = self._get_page_blocks(block['id'])
+                        child_blocks = self._get_page_blocks(block['id'], depth=depth + 1)
                         all_blocks.extend(child_blocks)
                 
                 has_more = response.get('has_more', False)
                 cursor = response.get('next_cursor')
-                time.sleep(0.3)
             
             return all_blocks
             
@@ -533,96 +646,161 @@ class NotionConnector:
     
     def _blocks_to_markdown(self, blocks: List[Dict]) -> str:
         """
-        ✅ [긴급 데이터 품질 개선] 블록 리스트를 Markdown 형식으로 변환
+        ✅ [리팩토링] 블록 리스트를 Markdown 형식으로 변환
         
-        URL만 추출되는 버그 방지: 순수 텍스트만 추출하고 이미지/파일 URL 제외
+        지원 블록 타입:
+        - heading_1/2/3, paragraph, bulleted/numbered_list_item
+        - code, quote, divider, image, file
+        - table, table_row, to_do, toggle, callout (신규 추가)
+        
+        깊이(depth)에 따라 들여쓰기 적용
         """
         markdown_lines = []
+        current_table_rows = []  # 테이블 행 버퍼
         
         for block in blocks:
             block_type = block.get('type')
             block_data = block.get(block_type, {})
+            depth = block.get('_depth', 0)
+            indent = '  ' * depth  # 깊이에 따른 들여쓰기
             
             try:
                 text = None
                 
+                # ===== 헤딩 =====
                 if block_type == 'heading_1':
                     text = self._extract_rich_text(block_data.get('rich_text', []))
-                    if text.strip():  # ✅ 공백만 있으면 제외
-                        markdown_lines.append(f'# {text}\n')
-                        logger.debug(f'[Notion] H1: {text[:50]}')
+                    if text.strip():
+                        markdown_lines.append(f'{indent}# {text}\n')
                 
                 elif block_type == 'heading_2':
                     text = self._extract_rich_text(block_data.get('rich_text', []))
                     if text.strip():
-                        markdown_lines.append(f'## {text}\n')
-                        logger.debug(f'[Notion] H2: {text[:50]}')
+                        markdown_lines.append(f'{indent}## {text}\n')
                 
                 elif block_type == 'heading_3':
                     text = self._extract_rich_text(block_data.get('rich_text', []))
                     if text.strip():
-                        markdown_lines.append(f'### {text}\n')
-                        logger.debug(f'[Notion] H3: {text[:50]}')
+                        markdown_lines.append(f'{indent}### {text}\n')
                 
+                # ===== 본문 =====
                 elif block_type == 'paragraph':
                     text = self._extract_rich_text(block_data.get('rich_text', []))
                     if text.strip():
-                        markdown_lines.append(f'{text}\n')
-                        logger.debug(f'[Notion] 단락: {text[:50]}')
+                        markdown_lines.append(f'{indent}{text}\n')
                 
+                # ===== 리스트 =====
                 elif block_type == 'bulleted_list_item':
                     text = self._extract_rich_text(block_data.get('rich_text', []))
                     if text.strip():
-                        markdown_lines.append(f'- {text}\n')
-                        logger.debug(f'[Notion] 불릿: {text[:50]}')
+                        markdown_lines.append(f'{indent}- {text}\n')
                 
                 elif block_type == 'numbered_list_item':
                     text = self._extract_rich_text(block_data.get('rich_text', []))
                     if text.strip():
-                        markdown_lines.append(f'1. {text}\n')
-                        logger.debug(f'[Notion] 번호: {text[:50]}')
+                        markdown_lines.append(f'{indent}1. {text}\n')
                 
+                # ===== 코드 =====
                 elif block_type == 'code':
                     text = self._extract_rich_text(block_data.get('rich_text', []))
                     language = block_data.get('language', 'text')
                     if text.strip():
-                        markdown_lines.append(f'```{language}\n{text}\n```\n')
-                        logger.debug(f'[Notion] 코드 ({language}): {text[:50]}')
+                        markdown_lines.append(f'{indent}```{language}\n{text}\n```\n')
                 
+                # ===== 인용 =====
                 elif block_type == 'quote':
                     text = self._extract_rich_text(block_data.get('rich_text', []))
                     if text.strip():
-                        markdown_lines.append(f'> {text}\n')
-                        logger.debug(f'[Notion] 인용: {text[:50]}')
+                        markdown_lines.append(f'{indent}> {text}\n')
                 
+                # ===== 구분선 =====
                 elif block_type == 'divider':
-                    markdown_lines.append('---\n')
-                    logger.debug('[Notion] 구분선')
+                    markdown_lines.append(f'{indent}---\n')
                 
-                # ✅ [중요] 이미지/파일 블록은 URL 대신 텍스트만 추출
+                # ===== ✅ [신규] To-Do (체크박스) =====
+                elif block_type == 'to_do':
+                    text = self._extract_rich_text(block_data.get('rich_text', []))
+                    checked = block_data.get('checked', False)
+                    checkbox = '[x]' if checked else '[ ]'
+                    if text.strip():
+                        markdown_lines.append(f'{indent}- {checkbox} {text}\n')
+                
+                # ===== ✅ [신규] Toggle =====
+                elif block_type == 'toggle':
+                    text = self._extract_rich_text(block_data.get('rich_text', []))
+                    if text.strip():
+                        markdown_lines.append(f'{indent}<details>\n{indent}<summary>{text}</summary>\n{indent}</details>\n')
+                
+                # ===== ✅ [신규] Callout =====
+                elif block_type == 'callout':
+                    text = self._extract_rich_text(block_data.get('rich_text', []))
+                    icon = block_data.get('icon', {})
+                    emoji = icon.get('emoji', '💡') if icon.get('type') == 'emoji' else '💡'
+                    if text.strip():
+                        markdown_lines.append(f'{indent}> {emoji} **{text}**\n')
+                
+                # ===== ✅ [신규] Table =====
+                elif block_type == 'table':
+                    # 테이블 시작 - 자식 블록(table_row)에서 처리됨
+                    pass
+                
+                # ===== ✅ [신규] Table Row =====
+                elif block_type == 'table_row':
+                    cells = block_data.get('cells', [])
+                    row_texts = []
+                    for cell in cells:
+                        cell_text = self._extract_rich_text(cell)
+                        row_texts.append(cell_text.strip() if cell_text else '')
+                    
+                    if row_texts:
+                        row_line = '| ' + ' | '.join(row_texts) + ' |'
+                        markdown_lines.append(f'{indent}{row_line}\n')
+                        
+                        # 첫 번째 행이면 헤더 구분선 추가
+                        if len(current_table_rows) == 0:
+                            header_sep = '| ' + ' | '.join(['---'] * len(row_texts)) + ' |'
+                            markdown_lines.append(f'{indent}{header_sep}\n')
+                        
+                        current_table_rows.append(row_texts)
+                
+                # ===== 이미지 (URL 제외) =====
                 elif block_type == 'image':
-                    # URL 대신, caption 텍스트만 가져오기
                     caption_text = self._extract_rich_text(block_data.get('caption', []))
                     if caption_text.strip():
-                        markdown_lines.append(f'[이미지] {caption_text}\n')
-                        logger.debug(f'[Notion] 이미지 캡션: {caption_text[:50]}')
-                    else:
-                        logger.debug('[Notion] 이미지 캡션 없음 (URL 제외)')
+                        markdown_lines.append(f'{indent}[이미지] {caption_text}\n')
                 
+                # ===== 파일 (URL 제외) =====
                 elif block_type == 'file':
-                    # 파일도 URL 대신 caption만
                     caption_text = self._extract_rich_text(block_data.get('caption', []))
                     if caption_text.strip():
-                        markdown_lines.append(f'[파일] {caption_text}\n')
-                        logger.debug(f'[Notion] 파일 캡션: {caption_text[:50]}')
-                    else:
-                        logger.debug('[Notion] 파일 캡션 없음 (URL 제외)')
+                        markdown_lines.append(f'{indent}[파일] {caption_text}\n')
+                
+                # ===== 북마크 =====
+                elif block_type == 'bookmark':
+                    caption_text = self._extract_rich_text(block_data.get('caption', []))
+                    url = block_data.get('url', '')
+                    if caption_text.strip():
+                        markdown_lines.append(f'{indent}[북마크] {caption_text}\n')
+                
+                # ===== ✅ [최적화] Child Page → 링크로 변환 =====
+                elif block_type == 'child_page':
+                    title = block_data.get('title', 'Untitled')
+                    block_id = block.get('id', '').replace('-', '')
+                    notion_url = f'https://www.notion.so/{block_id}'
+                    markdown_lines.append(f'{indent}\n[📄 하위 페이지: {title}]({notion_url})\n')
+                
+                # ===== ✅ [최적화] Child Database → 링크로 변환 =====
+                elif block_type == 'child_database':
+                    title = block_data.get('title', 'Untitled')
+                    block_id = block.get('id', '').replace('-', '')
+                    notion_url = f'https://www.notion.so/{block_id}'
+                    markdown_lines.append(f'{indent}\n[🗄️ 하위 데이터베이스: {title}]({notion_url})\n')
                 
                 else:
                     logger.debug(f'[Notion] 미지원 블록 타입: {block_type}')
                 
             except Exception as e:
-                logger.warning(f'블록 변환 중 오류 ({block_type}): {str(e)}', exc_info=True)
+                logger.warning(f'블록 변환 중 오류 ({block_type}): {str(e)}')
                 continue
         
         final_markdown = ''.join(markdown_lines)
@@ -643,7 +821,7 @@ class NotionConnector:
         return None
     
     def _extract_title(self, page: Dict) -> str:
-        """페이지 객체에서 제목 추출"""
+        """페이지 객체에서 제목 추출 (Database Query 응답용)"""
         try:
             properties = page.get('properties', {})
             
@@ -657,4 +835,33 @@ class NotionConnector:
             
         except Exception as e:
             logger.warning(f'제목 추출 실패: {str(e)}')
+            return 'Untitled'
+    
+    def _extract_title_from_search_result(self, page: Dict) -> str:
+        """Search API 응답에서 제목 추출 (구조가 다름)"""
+        try:
+            # Search API는 properties 구조가 Database Query와 다름
+            properties = page.get('properties', {})
+            
+            # 1. properties에서 title 타입 찾기
+            for prop_name, prop_value in properties.items():
+                if prop_value.get('type') == 'title':
+                    rich_text = prop_value.get('title', [])
+                    if rich_text:
+                        return self._extract_rich_text(rich_text)
+            
+            # 2. 페이지 자체의 title 필드 (일부 페이지 타입)
+            if page.get('title'):
+                title_list = page.get('title', [])
+                if isinstance(title_list, list) and title_list:
+                    return title_list[0].get('plain_text', '') or title_list[0].get('text', {}).get('content', 'Untitled')
+            
+            # 3. child_page 타입인 경우
+            if page.get('type') == 'child_page':
+                return page.get('child_page', {}).get('title', 'Untitled')
+            
+            return 'Untitled'
+            
+        except Exception as e:
+            logger.warning(f'Search 제목 추출 실패: {str(e)}')
             return 'Untitled'

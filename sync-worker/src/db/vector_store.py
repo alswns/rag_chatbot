@@ -1,29 +1,52 @@
 """
 VectorStoreManager - ChromaDB를 통한 벡터 저장소 관리
 
-HuggingFace의 BAAI/bge-m3 임베딩 모델을 사용하여 문서를 저장하고 조회합니다.
-Hybrid Search (BM25 + Vector) + Reranking으로 검색 정확도를 극대화합니다.
+싱글톤 임베딩 서비스를 사용하여 중복 로드를 방지합니다.
+Cross-Encoder Reranking과 Graph Traversal을 지원합니다.
 """
 
 import logging
-from typing import List, Dict, Any, Optional
+import os
+import pickle
+from typing import List, Dict, Any, Optional, Set
 import chromadb
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from utils.embedding_service import get_embedding_service
 import time
 import torch
 from rank_bm25 import BM25Okapi
 import re
-
-# ✅ [Reranking] FlashRank 임포트
-try:
-    from flashrank import Ranker
-    FLASHRANK_AVAILABLE = True
-except ImportError:
-    FLASHRANK_AVAILABLE = False
-    logger = logging.getLogger(__name__)
-    logger.warning('⚠️  FlashRank 미설치: Reranking 기능 비활성화')
+import networkx as nx
 
 logger = logging.getLogger(__name__)
+
+# BGE Reranker 싱글톤 (한국어 성능 우수)
+_reranker = None
+
+def get_reranker():
+    """
+    ✅ BGE Reranker 싱글톤 반환
+    
+    - 기본 모델: BAAI/bge-reranker-v2-m3 (다국어, 한국어 성능 우수)
+    - 대안 모델: cross-encoder/ms-marco-MiniLM-L-6-v2 (영어 전용)
+    """
+    global _reranker
+    if _reranker is None:
+        try:
+            from sentence_transformers import CrossEncoder
+            # ✅ BGE Reranker - 한국어/다국어 성능 우수
+            model_name = os.getenv('RERANKER_MODEL', 'BAAI/bge-reranker-v2-m3')
+            logger.info(f'🔄 BGE Reranker 로딩: {model_name}')
+            _reranker = CrossEncoder(model_name, max_length=1024)  # BGE는 1024 지원
+            logger.info(f'✅ BGE Reranker 로드 완료')
+        except Exception as e:
+            logger.warning(f'⚠️ Reranker 로드 실패: {str(e)}')
+            _reranker = None
+    return _reranker
+
+# 하위 호환성 유지
+def get_cross_encoder():
+    """[DEPRECATED] get_reranker() 사용 권장"""
+    return get_reranker()
 
 
 class VectorStoreManager:
@@ -66,19 +89,13 @@ class VectorStoreManager:
                     logger.error(f'ChromaDB 연결 최종 실패: {str(e)}')
                     raise
         
-        # HuggingFace 임베딩 모델 초기화 (GPU 자동 감지)
+        # 싱글톤 임베딩 서비스 (중복 로드 방지)
         try:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            logger.info(f'임베딩 디바이스: {device}')
-            
-            self.embeddings = HuggingFaceEmbeddings(
-                model_name=model_name,
-                model_kwargs={"device": device},
-                encode_kwargs={"normalize_embeddings": True}
-            )
-            logger.info(f'HuggingFace 임베딩 모델 로드 완료: {model_name} ({device})')
+            logger.info(f'🔄 싱글톤 임베딩 서비스 초기화: {model_name}')
+            self.embedding_service = get_embedding_service(model_name)
+            logger.info(f'✅ 싱글톤 임베딩 서비스 준비 완료: {model_name}')
         except Exception as e:
-            logger.error(f'임베딩 모델 로드 실패: {str(e)}')
+            logger.error(f'임베딩 서비스 초기화 실패: {str(e)}', exc_info=True)
             raise
         
         # 기본 컬렉션 이름
@@ -95,26 +112,34 @@ class VectorStoreManager:
             logger.error(f'컬렉션 초기화 실패: {str(e)}')
             raise
         
+        # 그래프 (검색 시 활용)
+        self.graph: Optional[nx.DiGraph] = None
+        self._load_graph()
+    
+    def _load_graph(self) -> None:
+        """그래프 파일 로드 (검색 시 활용)"""
+        graph_path = os.getenv('GRAPH_PERSIST_PATH', './data/graph.pkl')
+        try:
+            if os.path.exists(graph_path):
+                with open(graph_path, 'rb') as f:
+                    data = pickle.load(f)
+                    # dict 형식인 경우 graph 키에서 추출
+                    if isinstance(data, dict):
+                        self.graph = data.get('graph', nx.DiGraph())
+                    else:
+                        self.graph = data
+                logger.info(f'✅ 그래프 로드 완료: {self.graph.number_of_nodes()}개 노드, {self.graph.number_of_edges()}개 엣지')
+            else:
+                self.graph = nx.DiGraph()
+                logger.info('📊 그래프 파일 없음 - 빈 그래프 생성')
+        except Exception as e:
+            logger.warning(f'⚠️ 그래프 로드 실패: {str(e)}')
+            self.graph = nx.DiGraph()
+        
         # BM25 인덱스 초기화 (지연 로딩)
         self.bm25_index: Optional[BM25Okapi] = None
         self.bm25_corpus: List[List[str]] = []
         self.bm25_doc_ids: List[str] = []
-        
-        # ✅ [Reranking] FlashRank Reranker 초기화
-        self.ranker: Optional[Ranker] = None
-        if FLASHRANK_AVAILABLE:
-            try:
-                logger.info('⏳ FlashRank Reranker 초기화 중...')
-                self.ranker = Ranker(
-                    model_name="ms-marco-MiniLM-L-12-v2",
-                    cache_dir="/app/models"
-                )
-                logger.info('✅ FlashRank Reranker 초기화 완료 (가벼운 모델: ~40MB)')
-            except Exception as e:
-                logger.warning(f'⚠️  FlashRank 초기화 실패: {str(e)}. Reranking 없이 진행합니다.')
-                self.ranker = None
-        else:
-            logger.warning('⚠️  FlashRank 미설치: Reranking 기능 비활성화')
     
     def add_documents(self, documents: List[Dict[str, Any]], batch_size: int = 100) -> int:
         """
@@ -125,7 +150,8 @@ class VectorStoreManager:
                 {
                     'id': str,
                     'content': str,
-                    'metadata': dict
+                    'metadata': dict,
+                    'embedding': Optional[List[float]]  # 사전 생성된 임베딩 (선택사항)
                 }
             batch_size: 배치 크기
         
@@ -150,6 +176,8 @@ class VectorStoreManager:
                 ids = []
                 documents_text = []
                 metadatas = []
+                embeddings_list = []
+                use_precomputed = False
                 
                 for doc in batch:
                     # 필수 필드 검증
@@ -159,18 +187,34 @@ class VectorStoreManager:
                     
                     ids.append(str(doc['id']))  # ID는 문자열로 변환
                     documents_text.append(str(doc['content']))  # Content는 문자열로 변환
-                    metadatas.append(doc.get('metadata', {}))
+                    
+                    # 메타데이터 정제 (ChromaDB는 None 값 불허)
+                    metadata = doc.get('metadata', {})
+                    cleaned_metadata = {k: v for k, v in metadata.items() if v is not None}
+                    metadatas.append(cleaned_metadata)
+                    
+                    # 사전 생성된 임베딩이 있으면 사용 (numpy array 체크)
+                    if 'embedding' in doc:
+                        embedding = doc['embedding']
+                        if embedding is not None and (isinstance(embedding, list) or hasattr(embedding, '__len__')):
+                            embeddings_list.append(embedding)
+                            use_precomputed = True
                 
                 if not ids:
                     logger.warning(f'배치 {batch_num}: 유효한 문서 없음')
                     continue
                 
-                logger.debug(f'배치 {batch_num}: {len(ids)}개 문서 임베딩 생성 중...')
-                
-                # 임베딩 생성
+                # 임베딩 생성 또는 사용
                 try:
-                    embeddings_list = self.embeddings.embed_documents(documents_text)
-                    logger.debug(f'배치 {batch_num}: {len(documents_text)}개 문서 임베딩 완료')
+                    if use_precomputed and len(embeddings_list) == len(ids):
+                        # 사전 생성된 임베딩 사용
+                        logger.info(f'배치 {batch_num}: {len(embeddings_list)}개 문서 (사전 생성 임베딩)')
+                    else:
+                        # 임베딩 생성 (싱글톤 서비스 사용)
+                        logger.debug(f'배치 {batch_num}: {len(ids)}개 문서 임베딩 생성 중...')
+                        embeddings_array = self.embedding_service.encode(documents_text)
+                        embeddings_list = embeddings_array.tolist()  # numpy array → list
+                        logger.debug(f'배치 {batch_num}: {len(documents_text)}개 문서 임베딩 완료')
                 except Exception as e:
                     logger.error(f'임베딩 생성 실패 (배치 {batch_num}): {str(e)}')
                     failed_count += len(batch)
@@ -244,123 +288,303 @@ class VectorStoreManager:
             logger.error(f'데이터 삭제 실패 ({source}): {str(e)}')
             return 0
     
-    def search(self, query: str, top_k: int = 5, use_hybrid: bool = True) -> List[Dict[str, Any]]:
+    def delete_by_document_id(self, document_id: str) -> int:
         """
-        ✅ [하이브리드 + Reranking] Hybrid Search + 정밀 재정렬
+        ✅ [Delta Sync] 특정 문서 ID의 모든 청크 삭제
         
-        3단계 검색:
-        1. [Broad] 벡터 + BM25로 20개 후보 추출 (빠르지만 부정확)
-        2. [Reranking] 정밀 Reranker가 20개를 꼼꼼히 재평가 (정확함)
-        3. [Select] Reranking 상위 top_k개 반환
+        Notion 페이지가 수정되면 해당 페이지의 모든 청크를 삭제하고
+        새로 생성된 청크로 교체합니다.
+        
+        Args:
+            document_id: Notion 페이지 ID
+        
+        Returns:
+            삭제된 청크 개수
+        """
+        try:
+            # document_id에 해당하는 모든 청크 검색
+            results = self.collection.get(
+                where={"document_id": document_id}
+            )
+            
+            if not results or not results.get('ids'):
+                return 0
+            
+            delete_ids = results['ids']
+            
+            # 삭제 수행
+            self.collection.delete(ids=delete_ids)
+            
+            logger.debug(f'문서 "{document_id}"에서 {len(delete_ids)}개 청크 삭제')
+            return len(delete_ids)
+            
+        except Exception as e:
+            logger.error(f'청크 삭제 실패 ({document_id}): {str(e)}')
+            return 0
+    
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        use_hybrid: bool = True,
+        use_graph: bool = True,
+        use_reranking: bool = True,
+        graph_depth: int = 1
+    ) -> List[Dict[str, Any]]:
+        """
+        ✅ [Graph-Enhanced Hybrid Search + Cross-Encoder Reranking]
+        
+        5단계 검색 파이프라인:
+        1. [Broad] 벡터 + BM25로 후보 추출
+        2. [Graph Expansion] 후보의 연결된 문서도 포함
+        3. [Hybrid Score] 벡터 0.7 + BM25 0.3 + Graph 보너스
+        4. [Cross-Encoder Reranking] 정밀 재정렬
+        5. [Select] 상위 top_k개 반환
         
         Args:
             query: 검색 쿼리
             top_k: 반환할 상위 문서 개수
             use_hybrid: 하이브리드 검색 사용 여부
+            use_graph: 그래프 확장 사용 여부
+            use_reranking: Cross-Encoder Reranking 사용 여부
+            graph_depth: 그래프 탐색 깊이
         
         Returns:
             정밀하게 재정렬된 검색 결과
         """
         try:
-            # [Step 1] 1차 검색: 벡터 + BM25 (넉넉하게 20개 추출)
-            search_k = min(top_k * 4, 20)  # top_k=5면 20개, top_k=2면 8개
+            logger.info(f'🔍 검색 시작: "{query[:50]}..." (top_k={top_k}, graph={use_graph}, rerank={use_reranking})')
             
-            query_embedding = self.embeddings.embed_query(query)
+            # ========================================
+            # [Step 1] 1차 검색: 벡터 검색
+            # ========================================
+            search_k = min(top_k * 4, 30)  # 후보 풀
+            
+            # 쿼리 임베딩 생성
+            query_embedding_array = self.embedding_service.encode([query])
+            query_embedding = query_embedding_array[0].tolist()
+            
             vector_results = self.collection.query(
                 query_embeddings=[query_embedding],
                 n_results=search_k
             )
             
-            vector_scores = []
+            if not vector_results['ids'][0]:
+                logger.warning('검색 결과 없음')
+                return []
+            
+            # 결과 초기화
+            results_map: Dict[str, Dict[str, Any]] = {}
+            
             for i, doc_id in enumerate(vector_results['ids'][0]):
-                # 거리를 유사도 점수로 변환 (코사인 거리: 0~2, 유사도: 1~(-1))
                 similarity = 1 / (1 + vector_results['distances'][0][i])
-                vector_scores.append({
+                results_map[doc_id] = {
                     'id': doc_id,
                     'content': vector_results['documents'][0][i],
                     'metadata': vector_results['metadatas'][0][i],
                     'vector_score': similarity,
                     'bm25_score': 0.0,
-                    'hybrid_score': similarity
-                })
+                    'graph_score': 0.0,
+                    'rerank_score': 0.0,
+                    'final_score': similarity,
+                    'source': 'vector'
+                }
             
-            if not use_hybrid or not vector_scores:
-                return vector_scores[:top_k]
+            logger.debug(f'[Step 1] 벡터 검색: {len(results_map)}개 후보')
             
-            # [Step 2] BM25 점수 계산
-            bm25_scores = self._calculate_bm25_scores(
-                query=query,
-                doc_ids=[r['id'] for r in vector_scores],
-                documents=[r['content'] for r in vector_scores]
-            )
-            
-            # [Step 3] Hybrid 스코어 계산 (0.7 * 벡터 + 0.3 * BM25)
-            for result in vector_scores:
-                doc_id = result['id']
-                bm25_score = bm25_scores.get(doc_id, 0.0)
-                result['bm25_score'] = bm25_score
+            # ========================================
+            # [Step 2] 그래프 확장 (Graph Traversal)
+            # ========================================
+            if use_graph and self.graph and self.graph.number_of_nodes() > 0:
+                expanded_doc_ids = self._expand_with_graph(
+                    seed_doc_ids=list(results_map.keys()),
+                    depth=graph_depth
+                )
                 
-                # 정규화
-                normalized_vector = max(0, min(1, result['vector_score']))
-                normalized_bm25 = max(0, min(1, bm25_score))
+                # 확장된 문서 중 새로운 것만 추가
+                new_doc_ids = [d for d in expanded_doc_ids if d not in results_map]
                 
-                result['hybrid_score'] = (0.7 * normalized_vector) + (0.3 * normalized_bm25)
+                if new_doc_ids:
+                    # ChromaDB에서 확장된 문서 조회
+                    try:
+                        expanded_docs = self.collection.get(
+                            ids=new_doc_ids[:20],  # 최대 20개
+                            include=['documents', 'metadatas']
+                        )
+                        
+                        for i, doc_id in enumerate(expanded_docs['ids']):
+                            if doc_id not in results_map:
+                                results_map[doc_id] = {
+                                    'id': doc_id,
+                                    'content': expanded_docs['documents'][i] if expanded_docs['documents'] else '',
+                                    'metadata': expanded_docs['metadatas'][i] if expanded_docs['metadatas'] else {},
+                                    'vector_score': 0.3,  # 그래프로 발견된 문서는 낮은 벡터 점수
+                                    'bm25_score': 0.0,
+                                    'graph_score': 0.5,  # 그래프 보너스
+                                    'rerank_score': 0.0,
+                                    'final_score': 0.4,
+                                    'source': 'graph'
+                                }
+                        
+                        logger.debug(f'[Step 2] 그래프 확장: +{len(new_doc_ids)}개 문서')
+                    except Exception as e:
+                        logger.warning(f'그래프 확장 문서 조회 실패: {str(e)}')
             
-            # [Step 4] Hybrid 점수로 정렬
-            vector_scores.sort(key=lambda x: x['hybrid_score'], reverse=True)
-            logger.info(f'✅ Hybrid Search: {search_k}개 후보 추출')
-            
-            # [Step 5] ✅ Reranking (선택사항)
-            if self.ranker is not None and len(vector_scores) > 0:
-                logger.info(f'⏳ Reranking 시작: {query} ({len(vector_scores)}개 후보)')
+            # ========================================
+            # [Step 3] BM25 + Hybrid 스코어 계산 (✅ Min-Max 정규화)
+            # ========================================
+            if use_hybrid:
+                doc_ids = list(results_map.keys())
+                documents = [results_map[d]['content'] for d in doc_ids]
                 
-                try:
-                    # FlashRank 포맷: List[{"id": "...", "text": "..."}]
-                    passages = [
-                        {
-                            "id": r['id'],
-                            "text": r['content']
-                        }
-                        for r in vector_scores
-                    ]
+                bm25_scores = self._calculate_bm25_scores(
+                    query=query,
+                    doc_ids=doc_ids,
+                    documents=documents
+                )
+                
+                # ✅ [Min-Max Normalization] BM25 점수를 0~1로 정규화
+                bm25_values = list(bm25_scores.values())
+                bm25_min = min(bm25_values) if bm25_values else 0
+                bm25_max = max(bm25_values) if bm25_values else 1
+                bm25_range = bm25_max - bm25_min if bm25_max > bm25_min else 1
+                
+                # ✅ [Min-Max Normalization] Vector 점수도 정규화
+                vector_values = [r['vector_score'] for r in results_map.values()]
+                vector_min = min(vector_values) if vector_values else 0
+                vector_max = max(vector_values) if vector_values else 1
+                vector_range = vector_max - vector_min if vector_max > vector_min else 1
+                
+                # Hybrid 스코어 계산 (정규화된 점수 사용)
+                for doc_id, result in results_map.items():
+                    bm25_score = bm25_scores.get(doc_id, 0.0)
+                    result['bm25_score'] = bm25_score
                     
-                    # ✅ FlashRank rerank() 메서드 호출 (올바른 API)
-                    ranked = self.ranker.rerank(query, passages, top_k=top_k)
+                    # ✅ Min-Max 정규화 (0~1 범위로 압축)
+                    normalized_vector = (result['vector_score'] - vector_min) / vector_range
+                    normalized_bm25 = (bm25_score - bm25_min) / bm25_range
+                    graph_bonus = result.get('graph_score', 0.0)  # 이미 0~1
                     
-                    # Reranked 결과를 원본 포맷으로 변환
-                    reranked_results = []
-                    for rank_idx, ranked_item in enumerate(ranked):
-                        # 원본 결과에서 찾기
-                        for orig in vector_scores:
-                            if orig['id'] == ranked_item['id']:
-                                reranked_results.append({
-                                    **orig,
-                                    'reranker_score': float(ranked_item.get('score', 0.0)),
-                                    'reranker_rank': rank_idx + 1
-                                })
-                                break
+                    # ✅ Hybrid = 0.6 * Vector + 0.25 * BM25 + 0.15 * Graph
+                    # 모든 점수가 0~1 범위이므로 공정한 가중치 적용
+                    result['final_score'] = (
+                        0.6 * normalized_vector +
+                        0.25 * normalized_bm25 +
+                        0.15 * graph_bonus
+                    )
+                
+                logger.debug(f'[Step 3] Hybrid 스코어 계산 완료 (BM25 범위: {bm25_min:.2f}~{bm25_max:.2f})')
+            
+            # ========================================
+            # [Step 4] BGE Reranker (✅ Min-Max 정규화)
+            # ========================================
+            if use_reranking:
+                reranker = get_reranker()
+                
+                if reranker:
+                    # Reranking할 후보 (상위 15개)
+                    sorted_results = sorted(
+                        results_map.values(),
+                        key=lambda x: x['final_score'],
+                        reverse=True
+                    )[:15]
                     
-                    if reranked_results:
-                        logger.info(f'✅ Reranking 완료: 상위 {len(reranked_results)}개 (1위 점수: {reranked_results[0].get("reranker_score", 0.0):.4f})')
-                        return reranked_results
-                    else:
-                        logger.warning('⚠️  Reranking 결과 없음 (Hybrid 결과로 폴백)')
-                        return vector_scores[:top_k]
+                    # Query-Document 쌍 생성 (BGE는 1024자 지원)
+                    pairs = [(query, r['content'][:2000]) for r in sorted_results]
                     
-                except AttributeError as e:
-                    logger.warning(f'⚠️  FlashRank API 오류: {str(e)}. Hybrid 결과로 폴백합니다.')
-                    return vector_scores[:top_k]
-                except Exception as e:
-                    logger.warning(f'⚠️  Reranking 오류 (Hybrid 결과로 폴백): {str(e)}')
-                    return vector_scores[:top_k]
-            else:
-                # Reranker 없으면 Hybrid 결과만 반환
-                logger.info(f'ℹ️  Reranker 미사용: Hybrid 결과 직접 반환')
-                return vector_scores[:top_k]
+                    try:
+                        rerank_scores = reranker.predict(pairs)
+                        
+                        # ✅ [Min-Max Normalization] Rerank 점수 정규화
+                        rerank_min = min(rerank_scores)
+                        rerank_max = max(rerank_scores)
+                        rerank_range = rerank_max - rerank_min if rerank_max > rerank_min else 1
+                        
+                        for i, result in enumerate(sorted_results):
+                            raw_score = float(rerank_scores[i])
+                            result['rerank_score'] = raw_score
+                            
+                            # ✅ Min-Max 정규화 (0~1)
+                            normalized_rerank = (raw_score - rerank_min) / rerank_range
+                            
+                            # ✅ Rerank 점수 반영 (0.4 * 기존 + 0.6 * Rerank)
+                            result['final_score'] = (
+                                0.4 * result['final_score'] +
+                                0.6 * normalized_rerank
+                            )
+                        
+                        logger.debug(f'[Step 4] BGE Reranker 완료 (Rerank 범위: {rerank_min:.2f}~{rerank_max:.2f})')
+                    except Exception as e:
+                        logger.warning(f'Reranking 실패: {str(e)}')
+                else:
+                    logger.debug('[Step 4] Reranker 미사용')
+            
+            # ========================================
+            # [Step 5] 최종 정렬 및 반환
+            # ========================================
+            final_results = sorted(
+                results_map.values(),
+                key=lambda x: x['final_score'],
+                reverse=True
+            )[:top_k]
+            
+            # 로그
+            logger.info(f'✅ 검색 완료: {len(final_results)}개 반환')
+            for i, r in enumerate(final_results[:3]):
+                title = r['metadata'].get('title', 'Untitled')[:30]
+                logger.debug(f'   #{i+1}: {title}... (score={r["final_score"]:.3f}, src={r["source"]})')
+            
+            return final_results
             
         except Exception as e:
-            logger.error(f'❌ 검색 실패: {str(e)}')
+            logger.error(f'❌ 검색 실패: {str(e)}', exc_info=True)
             return []
+    
+    def _expand_with_graph(
+        self,
+        seed_doc_ids: List[str],
+        depth: int = 1
+    ) -> List[str]:
+        """
+        ✅ [Graph Traversal] 시드 문서에서 연결된 문서 확장
+        
+        Args:
+            seed_doc_ids: 시드 문서 ID 리스트
+            depth: 탐색 깊이
+        
+        Returns:
+            확장된 문서 ID 리스트 (시드 포함)
+        """
+        if not self.graph or self.graph.number_of_nodes() == 0:
+            return seed_doc_ids
+        
+        expanded: Set[str] = set()
+        
+        for doc_id in seed_doc_ids[:5]:  # 상위 5개만 확장
+            # document_id 추출 (chunk_id에서)
+            base_doc_id = doc_id.split('_chunk_')[0] if '_chunk_' in doc_id else doc_id
+            
+            if base_doc_id in self.graph:
+                try:
+                    # ego_graph로 depth 범위 내 노드 추출
+                    subgraph = nx.ego_graph(
+                        self.graph,
+                        base_doc_id,
+                        radius=depth,
+                        undirected=True
+                    )
+                    
+                    for node_id in subgraph.nodes():
+                        # 가상 노드 제외
+                        node_data = self.graph.nodes.get(node_id, {})
+                        if node_data.get('node_type') not in ['virtual_root', 'ghost']:
+                            expanded.add(node_id)
+                            
+                except Exception as e:
+                    logger.debug(f'그래프 탐색 실패 ({base_doc_id}): {str(e)}')
+        
+        logger.debug(f'🔗 그래프 확장: {len(seed_doc_ids)} → {len(expanded)}개 문서')
+        return list(expanded)
     
     def _calculate_bm25_scores(
         self,

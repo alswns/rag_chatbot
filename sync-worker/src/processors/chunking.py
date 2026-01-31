@@ -15,120 +15,138 @@ logger = logging.getLogger(__name__)
 
 
 class ChunkingProcessor:
-    """텍스트 분할 및 청크 처리 클래스"""
+    """
+    ✅ [최적화됨] 구조 기반 하이브리드 청킹 프로세서
+    
+    핵심 전략:
+    1. H3 제거 → H1, H2만 사용 → 문맥 파편화 방지
+    2. Context Injection → 본문 앞에 "Context: {Title} > {Header Path}" 주입
+    3. Separator 최적화 → Notion 구분선, 코드블록 보호
+    4. chunk_size=2000, overlap=200 (BGE-M3 최적)
+    """
     
     def __init__(
         self,
-        markdown_chunk_size: int = 1000,
-        markdown_chunk_overlap: int = 200,
-        recursive_chunk_size: int = 500,
-        recursive_chunk_overlap: int = 100
+        markdown_chunk_size: int = 2000,  # 사용 안 함 (호환성 유지)
+        recursive_chunk_size: int = 2000,
+        recursive_chunk_overlap: int = 200
     ):
         """
         Args:
-            markdown_chunk_size: Markdown 헤더 분할 시 청크 크기
-            markdown_chunk_overlap: Markdown 헤더 분할 시 오버랩
-            recursive_chunk_size: 재귀적 분할 시 청크 크기
-            recursive_chunk_overlap: 재귀적 분할 시 오버랩
+            markdown_chunk_size: 호환성 유지용 (실제 미사용)
+            recursive_chunk_size: 청크 최대 크기 (기본 2000)
+            recursive_chunk_overlap: 청크 간 오버랩 (기본 200)
         """
-        # 1단계: Markdown 헤더 기준 분할
+        # 1단계: Markdown 헤더 기준 (H1, H2만 - H3 제거로 문맥 유지)
         self.markdown_splitter = MarkdownHeaderTextSplitter(
             headers_to_split_on=[
                 ("#", "Header 1"),
-                ("##", "Header 2"),
-                ("###", "Header 3"),
+                # ("##", "Header 2"),
+                # ❌ H3 제거 - 문맥 파편화 방지
             ],
-            return_each_line=False,
+            strip_headers=False,  # 헤더 텍스트를 본문에 남겨둠
         )
         
         # 2단계: 재귀적 문자 기준 분할
+        # ✅ Separator 최적화: 노션 구분선, 코드블록 보호
         self.recursive_splitter = RecursiveCharacterTextSplitter(
             chunk_size=recursive_chunk_size,
             chunk_overlap=recursive_chunk_overlap,
-            separators=["\n\n", "\n", "。", "，", " ", ""]
+            separators=[
+                "\n\n",      # 빈 줄 (단락 구분)
+                "\n---",     # Notion 구분선
+                "\n## ",     # H2 헤더
+                "```",       # 코드블록 (보호)
+                "\n",        # 일반 줄바꿈
+                ". ",        # 문장 끝
+                "? ",
+                "! ",
+                " ",
+                ""
+            ]
         )
         
-        logger.info('ChunkingProcessor 초기화 완료')
+        logger.info(f'ChunkingProcessor 초기화 완료 (chunk_size={recursive_chunk_size}, overlap={recursive_chunk_overlap})')
     
     def process_notion_page(
         self,
         page_id: str,
         title: str,
         content: str,
-        last_edited_time: str
+        last_edited_time: str,
+        breadcrumb_path: str = ''  # ✅ [추가] 부모 경로 (루트부터)
     ) -> List[Dict[str, Any]]:
         """
-        Notion 페이지를 처리하여 청크 생성
+        Notion 페이지를 청크로 분할
         
         Args:
-            page_id: Notion Page ID
+            page_id: 페이지 ID
             title: 페이지 제목
-            content: 페이지 내용 (Markdown 형식)
-            last_edited_time: 마지막 편집 시간
-        
+            content: 페이지 내용 (Markdown)
+            last_edited_time: 마지막 수정 시간
+            breadcrumb_path: 부모 경로 (예: "학사팀 매뉴얼 > 2024년 > 근로장학생 업무")
+            
         Returns:
-            메타데이터를 포함한 청크 리스트
+            청크 리스트
         """
-        logger.info(f'Notion 페이지 처리 시작: {page_id} - {title}')
+        logger.info(f'Notion 페이지 처리 시작: {title}')
         
         if not content:
-            logger.warning(f'빈 컨텐츠: {page_id}')
             return []
         
         chunks = []
         
         try:
-            # 1단계: Markdown 헤더 기준 분할
+            # 1단계: Markdown 헤더로 크게 덩어리 잡기
             header_chunks = self.markdown_splitter.split_text(content)
             
-            logger.debug(f'Markdown 분할 완료: {len(header_chunks)}개 청크')
-            
-            # 2단계: 재귀적 문자 기준 분할
             for i, header_chunk in enumerate(header_chunks):
-                # Document 객체로 변환
-                if isinstance(header_chunk, Document):
-                    chunk_content = header_chunk.page_content
-                    chunk_metadata = header_chunk.metadata
-                else:
-                    chunk_content = header_chunk
-                    chunk_metadata = {}
+                chunk_content = header_chunk.page_content
+                chunk_metadata = header_chunk.metadata
                 
-                # 재귀적 분할
+                # 2단계: 내용이 너무 길면 자르기 (Recursive)
                 sub_chunks = self.recursive_splitter.split_text(chunk_content)
                 
-                # 각 청크에 메타데이터 추가
+                # ✅ [개선] 문서 내 헤더 경로 (H1, H2)
+                header_path_parts = []
+                if chunk_metadata.get('Header 1'): header_path_parts.append(chunk_metadata['Header 1'])
+                if chunk_metadata.get('Header 2'): header_path_parts.append(chunk_metadata['Header 2'])
+                header_path = " > ".join(header_path_parts)
+                
                 for j, sub_chunk in enumerate(sub_chunks):
+                    # ✅ [핵심] Context Injection - 부모 경로(루트) + 헤더 경로
+                    # 예: "Context: 학사팀 매뉴얼 > 2024년 > 근로장학생 업무 > 신규채용 절차"
+                    context_parts = []
+                    
+                    # 1. 부모 페이지 경로 (루트부터, pipeline에서 전달)
+                    if breadcrumb_path:
+                        context_parts.append(breadcrumb_path)
+                    else:
+                        context_parts.append(title)
+                    
+                    # 2. 문서 내 헤더 경로 (H1, H2)
+                    if header_path:
+                        context_parts.append(header_path)
+                    
+                    full_context = " > ".join(context_parts)
+                    enriched_content = f"Context: {full_context}\n\n{sub_chunk}"
+
                     chunk_dict = {
-                        'content': sub_chunk,
+                        'content': enriched_content,  # 임베딩 품질 극대화
                         'metadata': {
                             'page_id': page_id,
                             'title': title,
+                            'breadcrumb_path': breadcrumb_path,  # ✅ 메타데이터에도 저장
                             'last_edited_time': last_edited_time,
                             'source': 'notion',
                             'chunk_index': f'{i}-{j}',
+                            # 메타데이터는 필터링용으로 유지
                             'header_1': chunk_metadata.get('Header 1', ''),
                             'header_2': chunk_metadata.get('Header 2', ''),
-                            'header_3': chunk_metadata.get('Header 3', ''),
-                        }
-                    }
-                    chunks.append(chunk_dict)
-                    chunk_dict = {
-                        'content': sub_chunk,
-                        'metadata': {
-                            'page_id': page_id,
-                            'title': title,
-                            'last_edited_time': last_edited_time,
-                            'source': 'notion',
-                            'chunk_index': f'{i}-{j}',
-                            # Markdown 헤더 정보 포함
-                            'header_1': chunk_metadata.get('Header 1', ''),
-                            'header_2': chunk_metadata.get('Header 2', ''),
-                            'header_3': chunk_metadata.get('Header 3', ''),
                         }
                     }
                     chunks.append(chunk_dict)
             
-            logger.info(f'총 {len(chunks)}개 청크 생성: {page_id}')
             return chunks
             
         except Exception as e:

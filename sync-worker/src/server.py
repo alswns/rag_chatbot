@@ -34,6 +34,11 @@ try:
 except ImportError:
     from db import VectorStoreManager
 
+try:
+    from processors.graph_rag import GraphRAGProcessor
+except ImportError:
+    GraphRAGProcessor = None
+
 # 환경변수 로드
 load_dotenv()
 
@@ -61,6 +66,7 @@ VLLM_API_URL = os.getenv('VLLM_API_URL', 'http://localhost:8000/v1')
 OLLAMA_API_URL = os.getenv('OLLAMA_API_URL', 'http://localhost:11434')
 CHROMA_HOST = os.getenv('CHROMA_HOST', 'localhost')
 CHROMA_PORT = int(os.getenv('CHROMA_PORT', '8000'))
+GRAPH_PERSIST_PATH = os.getenv('GRAPH_PERSIST_PATH', './data/graph.pkl')
 # ✅ [업그레이드] Full Page Retrieval 적용: 페이지 전체를 가져오므로 개수를 5에서 2로 줄임
 # 2개만 찾아도 페이지 2개 분량이 통째로 들어가므로 충분함
 SEARCH_TOP_K = int(os.getenv('SEARCH_TOP_K', '2'))
@@ -71,6 +77,7 @@ logger.info(f'✅ LLM Backend: {LLM_BACKEND.upper()}')
 # ==================== 글로벌 변수 ====================
 
 vector_store: Optional[VectorStoreManager] = None
+graph_processor: Optional['GraphRAGProcessor'] = None
 vllm_client: Optional[openai.OpenAI] = None
 available_models: List[Dict[str, Any]] = []
 
@@ -348,7 +355,7 @@ class QuestionAnsweringManager:
 @app.on_event('startup')
 async def startup():
     """서버 시작"""
-    global vector_store
+    global vector_store, graph_processor
     
     logger.info('=' * 70)
     logger.info('RAG API 시작 중...')
@@ -364,8 +371,19 @@ async def startup():
         stats = vector_store.get_collection_stats()
         logger.info(f'✅ 벡터 DB 준비: {stats.get("document_count", 0)}개 문서')
         
+        # 그래프 로드
+        logger.info('2️⃣  그래프 로드...')
+        if GraphRAGProcessor and os.path.exists(GRAPH_PERSIST_PATH):
+            graph_processor = GraphRAGProcessor.from_file(GRAPH_PERSIST_PATH)
+            if graph_processor:
+                logger.info(f'✅ 그래프 로드 완료: {graph_processor.graph.number_of_nodes()}개 노드, {graph_processor.graph.number_of_edges()}개 엣지')
+            else:
+                logger.warning('⚠️  그래프 로드 실패 - 벡터 검색만 사용')
+        else:
+            logger.info('ℹ️  그래프 파일 없음 - 벡터 검색만 사용')
+        
         # 모델 정보 로드
-        logger.info('2️⃣  모델 정보 로드...')
+        logger.info('3️⃣  모델 정보 로드...')
         models = ModelManager.get_models()
         logger.info(f'✅ {len(models)}개 모델 감지')
         
@@ -388,10 +406,18 @@ async def health_check() -> Dict:
             return {'status': 'unhealthy', 'error': 'Vector store not initialized'}
         
         stats = vector_store.get_collection_stats()
+        graph_stats = None
+        if graph_processor:
+            graph_stats = {
+                'nodes': graph_processor.graph.number_of_nodes(),
+                'edges': graph_processor.graph.number_of_edges()
+            }
+        
         return {
             'status': 'ok',
             'timestamp': datetime.now().isoformat(),
             'vector_store': stats,
+            'graph': graph_stats,
             'model': MODEL_NAME,
             'documents': stats.get('document_count', 0)
         }

@@ -1,0 +1,128 @@
+# Mac 데이터 수집용 Docker Compose
+# 환경: Apple Silicon (Mac)
+# 용도: Notion 데이터 수집 -> 그래프 구축 -> 데이터 이동 준비
+
+services:
+  # ==================== ChromaDB Vector Store ====================
+  chromadb:
+    image: chromadb/chroma:latest
+    platform: linux/arm64
+
+    environment:
+      - PERSIST_DIRECTORY=/chroma/data
+      - ANONYMIZED_TELEMETRY=false
+      - CHROMA_SERVER_AUTH_ENABLED=false
+
+    volumes:
+      # ✅ 호스트의 ./data/chroma 폴더에 데이터 저장 (Ubuntu 전송용)
+      - ./data/chroma:/chroma/data
+
+    ports:
+      - "8001:8000" # 로컬 포트 충돌 방지용 8001
+
+    networks:
+      - sync-network
+
+    restart: unless-stopped
+
+  # ==================== Sync Worker (데이터 수집) ====================
+  sync-worker:
+    image: rag-sync-worker:mac
+    container_name: rag-sync-worker
+    platform: linux/arm64
+
+    build:
+      context: ./sync-worker
+      dockerfile: Dockerfile
+
+    environment:
+      # 내부망 통신 (chromadb:8000)
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+
+      # Notion 설정
+      - NOTION_TOKEN=${NOTION_TOKEN}
+      - NOTION_DATABASE_ID=${NOTION_DATABASE_ID:-}
+      - NOTION_RELATION_COLUMN=작업
+
+      # 그래프 파일 저장 경로 (NetworkX pickle)
+      - GRAPH_PERSIST_PATH=/app/data/graph.pkl
+      - PROGRESS_FILE=/app/data/sync_progress.json
+
+      # 임베딩 모델 설정
+      - EMBEDDING_MODEL=BAAI/bge-m3
+
+      - SYNC_INTERVAL=300
+      - LOG_LEVEL=INFO
+
+      # HuggingFace 캐시 설정 (중요!)
+      - HF_HOME=/app/.cache/huggingface
+      - HF_HUB_DOWNLOAD_TIMEOUT=600
+      - TRANSFORMERS_OFFLINE=0
+      - HF_DATASETS_OFFLINE=0
+
+    volumes:
+      - ./sync-worker/src:/app/src
+      # ✅ 그래프 파일(graph.pkl)을 호스트와 공유
+      - ./data:/app/data
+      # ✅ HuggingFace 모델 캐시 (재빌드 시 모델 유지)
+      - hf-cache:/app/.cache/huggingface
+
+    networks:
+      - sync-network
+
+    depends_on:
+      - chromadb
+
+    command: python -u src/main.py
+    restart: unless-stopped
+
+  # ==================== 시각화 대시보드 (선택 사항) ====================
+  dashboard:
+    image: rag-sync-worker:mac
+    container_name: rag-dashboard
+    platform: linux/arm64
+
+    # 캐시 활용을 위해 빌드 컨텍스트 동일하게 유지
+    build:
+      context: ./sync-worker
+      dockerfile: Dockerfile
+
+    environment:
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - GRAPH_PERSIST_PATH=/app/data/graph.pkl
+      - DASHBOARD_PORT=8080
+      # ✅ HuggingFace 캐시 설정 (sync-worker와 동일)
+      - HF_HOME=/app/.cache/huggingface
+      - HF_HUB_DOWNLOAD_TIMEOUT=600
+      - TRANSFORMERS_OFFLINE=0
+      - HF_DATASETS_OFFLINE=0
+
+    volumes:
+      - ./sync-worker/src:/app/src
+      - ./data:/app/data
+      # ✅ HuggingFace 모델 캐시 (sync-worker와 공유)
+      - hf-cache:/app/.cache/huggingface
+
+    ports:
+      - "8080:8080"
+
+    networks:
+      - sync-network
+
+    # ✅ 팁: dashboard.py가 웹서버(Streamlit/Flask)여야 함
+    # 만약 정적 HTML 파일만 있다면: command: python -m http.server 8080 --directory /app/data
+    command: python -u src/dashboard.py
+
+    restart: unless-stopped
+
+networks:
+  sync-network:
+    driver: bridge
+
+volumes:
+  hf-cache:
+    driver: local
+
+# volumes 섹션 삭제 (Bind Mount만 사용하므로 불필요)

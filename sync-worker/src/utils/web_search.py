@@ -403,15 +403,8 @@ class WebSearchService:
             # Step 2: 검색 쿼리 생성 (히스토리 전달)
             search_query = await self.query_generator.generate_query(user_query, history=history)
             
-            # Step 3: 웹 검색 실행 (동기 메서드 호출)
-            import asyncio
-            loop = asyncio.get_event_loop()
-            results = await loop.run_in_executor(
-                None,
-                self.searcher.search,
-                search_query,
-                5  # max_results
-            )
+            # Step 3: 웹 검색 실행
+            results = await self.searcher.search(search_query, max_results=5)
             
             # Step 4: 결과 포맷팅
             if results:

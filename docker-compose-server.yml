@@ -46,7 +46,7 @@ services:
       - "--max-model-len"
       - "16384" # RAG 문맥을 위해 충분한 길이 확보
       - "--gpu-memory-utilization"
-      - "0.8"
+      - "0.85"
       - "--max-num-seqs"
       - "3"
       - "--quantization"
@@ -224,26 +224,6 @@ services:
 
     command: python -u src/main.py --once
 
-  # ==================== Ollama (CPU Backup) ====================
-  ollama:
-    image: ollama/ollama:latest
-    container_name: rag-ollama
-    profiles: ["ollama-backup"]
-
-    environment:
-      - OLLAMA_MODELS=/root/.ollama/models
-
-    volumes:
-      - ollama-models:/root/.ollama
-
-    ports:
-      - "11434:11434"
-
-    networks:
-      - rag-network
-
-    restart: unless-stopped
-
 networks:
   rag-network:
     driver: bridge
@@ -254,6 +234,4 @@ volumes:
   vllm-cache:
     driver: local
   webui-data:
-    driver: local
-  ollama-models:
     driver: local

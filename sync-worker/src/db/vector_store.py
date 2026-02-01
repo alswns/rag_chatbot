@@ -36,7 +36,13 @@ def get_reranker():
             # ✅ BGE Reranker - 한국어/다국어 성능 우수
             model_name = os.getenv('RERANKER_MODEL', 'BAAI/bge-reranker-v2-m3')
             logger.info(f'🔄 BGE Reranker 로딩: {model_name}')
-            _reranker = CrossEncoder(model_name, max_length=1024)  # BGE는 1024 지원
+            # _reranker = CrossEncoder(model_name, max_length=1024)  # BGE는 1024 지원
+            _reranker = CrossEncoder(
+                model_name, 
+                max_length=512, 
+                device='cuda',
+                automodel_args={"torch_dtype": torch.float16} # FP16 적용
+            )
             logger.info(f'✅ BGE Reranker 로드 완료')
         except Exception as e:
             logger.warning(f'⚠️ Reranker 로드 실패: {str(e)}')

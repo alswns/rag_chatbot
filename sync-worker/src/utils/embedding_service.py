@@ -1,6 +1,7 @@
 import logging
 from typing import Optional
 import numpy as np
+import torch
 from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
@@ -29,7 +30,12 @@ class EmbeddingService:
         if self._model is None:
             logger.info(f'🔄 임베딩 모델 로드 중: {model_name}')
             try:
-                self._model = SentenceTransformer(model_name)
+                # self._model = SentenceTransformer(model_name)
+                self._model = SentenceTransformer(
+                    model_name,
+                    device='cuda',
+                    model_kwargs={"torch_dtype": torch.float16} # FP16으로 메모리 50% 절감
+                )
                 logger.info(f'✅ 임베딩 모델 로드 완료: {model_name}')
             except Exception as e:
                 logger.error(f'❌ 임베딩 모델 로드 실패: {str(e)}')

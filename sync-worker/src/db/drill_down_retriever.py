@@ -78,10 +78,17 @@ class GraphDrillDownRetriever:
         self.hub_score_threshold = hub_score_threshold
         self.mention_depth = include_mention_depth
         
+        # ✅ 그래프 노드 타입 분석 (디버깅용)
+        node_types = set()
+        for _, data in graph.nodes(data=True):
+            node_type = data.get('node_type', data.get('type', 'unknown'))
+            node_types.add(node_type)
+        
         logger.info(f'✅ GraphDrillDownRetriever 초기화')
         logger.info(f'   - Hub 타입: {self.hub_types}')
         logger.info(f'   - 그래프 노드: {graph.number_of_nodes()}개')
         logger.info(f'   - 그래프 엣지: {graph.number_of_edges()}개')
+        logger.info(f'   - 탐지된 노드 타입: {node_types}')
     
     def retrieve(
         self,
@@ -127,7 +134,9 @@ class GraphDrillDownRetriever:
         
         # 점수가 임계값 미달이면 전역 검색
         if best_hub['score'] < self.hub_score_threshold:
-            logger.warning(f'[Step 1] Hub 점수 미달 ({best_hub["score"]:.3f} < {self.hub_score_threshold}) → 전역 검색')
+            logger.warning(f'[Step 1] Hub 점수 미달 ({best_hub["score"]:.3f} < {self.hub_score_threshold})')
+            logger.warning(f'[Step 1] 발견된 Hub 목록: {[(h["title"], h["score"]) for h in hub_nodes]}')
+            logger.warning(f'[Step 1] → 전역 검색으로 전환')
             return self._global_search(query, k, candidate_k, use_reranking)
         
         # =====================================================
@@ -170,16 +179,29 @@ class GraphDrillDownRetriever:
         try:
             # 그래프에서 Hub 타입 노드 ID 추출
             hub_node_ids = []
+            all_node_types = {}  # 디버깅: 모든 노드 타입 수집
+            
             for node_id, data in self.graph.nodes(data=True):
                 node_type = data.get('node_type', data.get('type', ''))
+                all_node_types[node_type] = all_node_types.get(node_type, 0) + 1
+                
                 if node_type in self.hub_types:
                     hub_node_ids.append(node_id)
             
+            # ✅ 디버깅: Hub 타입 노드 찾기 실패 원인 분석
             if not hub_node_ids:
-                logger.debug('[Step 1] Hub 타입 노드 없음')
-                return []
+                logger.warning(f'[Step 1] Hub 타입 노드 없음! 기대: {self.hub_types}')
+                logger.warning(f'[Step 1] 그래프 내 실제 노드 타입: {dict(all_node_types)}')
+                
+                # ✅ Fallback: 모든 노드를 후보로 사용 (더 유연한 검색)
+                if self.graph.number_of_nodes() > 0:
+                    logger.info('[Step 1] Fallback: 모든 노드를 Hub 후보로 사용')
+                    hub_node_ids = list(self.graph.nodes())[:100]  # 최대 100개
+                else:
+                    logger.error('[Step 1] 그래프가 비어있음!')
+                    return []
             
-            logger.debug(f'[Step 1] Hub 후보: {len(hub_node_ids)}개')
+            logger.info(f'[Step 1] Hub 후보: {len(hub_node_ids)}개')
             
             # 쿼리 임베딩 생성
             query_embedding = self.vector_store.embedding_service.encode([query])[0].tolist()
@@ -201,11 +223,14 @@ class GraphDrillDownRetriever:
                 )
             
             if not results['ids'][0]:
+                logger.warning('[Step 1] ChromaDB 검색 결과 없음')
+                logger.warning(f'[Step 1] Hub 후보 IDs: {hub_node_ids[:10]}...')  # 처음 10개
                 return []
             
             # Hub 노드만 필터링 및 정렬
             hub_results = []
             seen_docs = set()
+            skipped_count = 0  # 디버깅: 건너뛄 문서 수
             
             for i, doc_id in enumerate(results['ids'][0]):
                 metadata = results['metadatas'][0][i] if results['metadatas'] else {}
@@ -232,6 +257,15 @@ class GraphDrillDownRetriever:
                     
                     if len(hub_results) >= top_k:
                         break
+                else:
+                    skipped_count += 1
+            
+            # ✅ 디버꺅: 필터링 결과
+            if not hub_results:
+                logger.warning(f'[Step 1] Hub 필터링 후 결과 없음 (ChromaDB {len(results["ids"][0])}개 검색, {skipped_count}개 건너뛜)')
+                logger.warning(f'[Step 1] Hub IDs 예시: {hub_node_ids[:5]}')
+            else:
+                logger.info(f'[Step 1] Hub 필터링 성공: {len(hub_results)}개 발견 ({skipped_count}개 건너뛜)')
             
             # 점수 기준 정렬
             hub_results.sort(key=lambda x: x['score'], reverse=True)

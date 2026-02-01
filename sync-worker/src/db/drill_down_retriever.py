@@ -106,6 +106,11 @@ class GraphDrillDownRetriever:
         reranker_top_k = int(os.getenv('RERANKER_TOP_K', '50'))
         candidate_k = reranker_top_k if use_reranking else k
         
+        # 디버그 로그
+        logger.info(f'🔧 DEBUG: RERANKER_TOP_K env = {os.getenv("RERANKER_TOP_K")}, parsed = {reranker_top_k}')
+        logger.info(f'🔧 DEBUG: use_reranking = {use_reranking}, k = {k}')
+        logger.info(f'🔧 DEBUG: candidate_k calculation: {reranker_top_k} if {use_reranking} else {k} = {candidate_k}')
+        
         logger.info(f'🔍 드릴다운 검색 시작: "{query[:50]}..." (k={k}, candidate_k={candidate_k}, rerank={use_reranking})')
         
         # =====================================================

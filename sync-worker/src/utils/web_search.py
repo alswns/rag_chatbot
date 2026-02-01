@@ -1,25 +1,21 @@
 """
-조건부 웹 검색 모듈 (Conditional Web Search with Sanitization)
+웹 검색 모듈 (Refactored - Separation of Concerns)
 
-보안 최우선:
-- 내부 정보(프로젝트명, 변수명, IP 등) 유출 방지
-- LLM 기반 검색 필요성 판단
-- 세탁된 검색어만 외부로 전송
-
-효율성:
-- 내부 검색 결과가 충분하면 웹 검색 스킵
-- max_tokens=50으로 빠른 판단
+판단 로직과 생성 로직을 분리하여 LLM 성능 한계 극복:
+1. SearchDecisionMaker: Binary Decision (YES/NO)
+2. QueryGenerator: Clean Query Generation
+3. DuckDuckGoSearcher: Web Search Execution
 """
 
-import logging
 import os
-from typing import Optional, Tuple, List, Dict, Any
+import re
+import logging
+from typing import List, Dict, Any, Optional
 import openai
-import asyncio
 
 logger = logging.getLogger(__name__)
 
-# DuckDuckGo 검색 라이브러리
+# DuckDuckGo 라이브러리 임포트
 try:
     from duckduckgo_search import AsyncDDGS
 except ImportError:
@@ -27,271 +23,241 @@ except ImportError:
     logger.warning('⚠️ duckduckgo-search 미설치 - 웹 검색 비활성화')
 
 
+# ==================== 1. Binary Decision Maker ====================
+
 class SearchDecisionMaker:
-    """
-    ✅ 내부 RAG 검색 결과 분석 및 웹 검색 필요성 판단
+    """웹 검색 필요성 판단 (Binary: YES/NO)"""
     
-    보안 철칙:
-    - 내부 문서 내용을 외부로 전송하지 않음
-    - 검색어에서 민감 정보 제거 (프로젝트명, 변수명, IP, 경로 등)
-    """
-    
-    # 🎯 Answerability Check Prompt (정답 충족성 중심)
-    DECISION_PROMPT = """당신은 **답변 가능성 판단기(Answerability Judge)**입니다.
+    DECISION_PROMPT = """당신은 **정답 확인기(Answer Checker)**입니다.
 
 ## 작업
-사용자 질문과 [내부 문서 요약]을 대조하여, **질문에 대한 구체적인 정답**이 있는지 판단하세요.
+사용자의 질문에 대한 답이 [내부 문서]에 충분히 포함되어 있는지 확인하세요.
 
-## 판단 기준 (Exact Answer Rule)
+## 판단 기준
 
-### 1️⃣ **직접적 정답 유무 확인**
-- ❌ **나쁨 예:**
-  - 질문: "최신 리액트 버전이 뭐야?"
-  - 문서: "리액트 16 사용 중" (주제는 같지만 '최신' 정보 없음)
-  - 판단: **SEARCH** → `latest react version 2026`
+### YES (웹 검색 필요) 👉 다음 경우:
+- 내부 문서가 **완전히 비어있음**
+- 내부 문서에 **관련 정보가 전혀 없음**
+- 질문이 **최신 정보**(뉴스, 버전, 트렌드)를 요구함
+- 질문이 **일반 상식/개념**을 요구함 (위키피디아 수준)
+- 내부 문서에 **힌트만 있고 구체적 답이 없음** (예: URL만 있고 설명 없음)
 
-- ❌ **나쁨 예:**
-  - 질문: "S3 버킷 생성 방법 알려줘"
-  - 문서: "S3 버킷 이름은 'my-bucket'이다" (설정값만 있고 '생성 방법' 없음)
-  - 판단: **SEARCH** → `aws s3 create bucket tutorial`
+### NO (내부 문서로 충분) 👉 다음 경우:
+- 내부 문서에 **직접적인 답**이 있음
+- 설정값, 코드, 경로, IP 등 **구체적 정보**가 있음
+- 문서가 질문의 맥락과 **완전히 일치**함
 
-- ✅ **좋은 예:**
-  - 질문: "우리 프로젝트 서버 IP 뭐야?"
-  - 문서: "Server IP: 10.0.0.1" (직접적 정답 있음)
-  - 판단: **NO_SEARCH**
-
-### 2️⃣ **외부 지식 규칙 (External Knowledge Rule)**
-다음 유형의 질문은 무조건 웹 검색:
-- "최신 뉴스", "현재 트렌드", "2026년 기준"
-- 일반 상식/개념 설명 (예: "머신러닝이 뭐야?")
-- 외부 라이브러리 사용법 (예: "FastAPI 비동기 처리 방법")
-- 비교 분석 (예: "React vs Vue 장단점")
-
-### 3️⃣ **키워드 겹침 함정 경계**
-- 문서에 키워드만 언급되고 **구체적 수치/방법/코드**가 없으면 → **SEARCH**
-- 예: "파이썬 버전" 단어만 있고 "3.11", "3.12" 같은 숫자 없음 → 불충분
-
-## 🔒 보안 규칙 (검색어 세탁)
-웹 검색어에 **절대 포함 금지**:
-- 프로젝트명, 파일명, 변수명
-- IP 주소, 내부 도메인
-- 조직명, 팀명
-
-**일반적인 기술 용어만 사용!**
+## ⚠️ 중요
+- URL, 코드 스니펫, 설정값 등이 **힌트로만** 있으면 → **NO** (충분함)
+- 외부 정보가 **반드시** 필요할 때만 → **YES**
 
 ## 출력 형식
-- 내부 문서로 충분: `NO_SEARCH`
-- 외부 검색 필요: `영어 검색어` (3-5 단어)
+**오직 'YES' 또는 'NO' 단어 하나만 출력하세요.**
+(설명, 이유, 추가 문장 금지)
 
 ---
 
 ## 사용자 질문
-{user_query}
+{query}
 
-## 내부 검색 결과 요약
-{internal_summary}
+## 내부 문서
+{context}
 
-## 당신의 판단 (한 줄로):"""
+## 당신의 판단:"""
 
     def __init__(self, vllm_api_url: str = None):
-        """
-        Args:
-            vllm_api_url: vLLM API 엔드포인트 (None이면 환경변수 사용)
-        """
         self.vllm_api_url = vllm_api_url or os.getenv('VLLM_API_URL', 'http://localhost:8000/v1')
         self.client = None
-        
+    
     def _get_client(self) -> openai.OpenAI:
-        """vLLM 클라이언트 반환 (lazy initialization)"""
         if self.client is None:
             self.client = openai.OpenAI(
                 api_key='sk-not-needed',
                 base_url=self.vllm_api_url,
-                timeout=30.0  # 빠른 판단용
+                timeout=30.0
             )
         return self.client
     
-    def _summarize_internal_results(self, documents: List[Dict[str, Any]], max_docs: int = 3) -> tuple[str, float]:
+    async def needs_search(self, query: str, context: str) -> bool:
         """
-        내부 검색 결과 요약 (보안 고려)
-        
-        Args:
-            documents: 검색된 문서 리스트
-            max_docs: 요약할 최대 문서 수
+        웹 검색 필요 여부 판단
         
         Returns:
-            (요약 텍스트, 평균 유사도)
-        """
-        if not documents:
-            return "검색 결과 없음 - 내부 문서에서 관련 정보를 찾지 못했습니다.", 0.0
-        
-        summaries = []
-        total_score = 0.0
-        
-        for i, doc in enumerate(documents[:max_docs], 1):
-            title = doc.get('metadata', {}).get('title', 'Untitled')
-            content_preview = doc.get('content', '')[:200]  # 처음 200자만
-            score = doc.get('score', 0.0)
-            total_score += score
-            
-            summaries.append(f"[문서 {i}] 제목: {title}, 유사도: {score:.2f}, 내용 일부: {content_preview}...")
-        
-        avg_score = total_score / min(len(documents), max_docs)
-        return '\n'.join(summaries), avg_score
-    
-    async def sanitize_query(self, user_query: str) -> str:
-        """
-        검색어 세탁 (보안 정보 제거)
-        
-        Args:
-            user_query: 사용자 질문
-        
-        Returns:
-            세탁된 검색어
+            True: 웹 검색 필요
+            False: 내부 문서로 충분
         """
         try:
-            client = self._get_client()
-            sanitize_prompt = f"""다음 질문에서 프로젝트명, 변수명, 파일명 등의 민감한 내부 정보를 제거하고,
-일반적인 기술 용어로만 구성된 **영어 검색어**(3-5 단어)를 생성하세요.
-
-사용자 질문: {user_query}
-
-세탁된 검색어 (영어, 3-5 단어):"""
+            # 컨텍스트 요약 (너무 길면 잘라냄)
+            context_summary = context[:2000] if context else "검색 결과 없음"
             
+            prompt = self.DECISION_PROMPT.format(
+                query=query,
+                context=context_summary
+            )
+            
+            client = self._get_client()
             response = client.chat.completions.create(
                 model=os.getenv('LLM_MODEL_ID', 'DeepSeek-R1'),
                 messages=[
-                    {'role': 'system', 'content': '보안 검색 어시스턴트입니다.'},
-                    {'role': 'user', 'content': sanitize_prompt}
+                    {'role': 'system', 'content': '정답 확인기입니다.'},
+                    {'role': 'user', 'content': prompt}
+                ],
+                temperature=0.0,
+                max_tokens=10,  # YES/NO만 필요
+                stream=False
+            )
+            
+            decision = response.choices[0].message.content.strip().upper()
+            
+            # Parsing: YES 포함 여부
+            needs_search = 'YES' in decision
+            
+            logger.info(f'🔍 검색 판단: {"YES (웹 검색 필요)" if needs_search else "NO (내부 문서 충분)"}')
+            logger.debug(f'LLM 원본 응답: "{decision}"')
+            
+            return needs_search
+            
+        except Exception as e:
+            logger.error(f'❌ 검색 판단 실패: {str(e)}')
+            # 에러 시 안전하게 검색하지 않음 (보수적)
+            return False
+
+
+# ==================== 2. Query Generator ====================
+
+class QueryGenerator:
+    """검색 엔진용 쿼리 생성 (Clean Output)"""
+    
+    GENERATION_PROMPT = """DuckDuckGo 검색을 위한 **영어 키워드**를 생성하세요.
+
+## 규칙
+1. **3-5 단어**로 구성
+2. **일반적인 기술 용어**만 사용
+3. **프로젝트명, 파일명, 변수명, IP 주소 제거**
+4. 설명이나 접두어 없이 **오직 키워드만** 출력
+
+## 예시
+- 입력: "우리 프로젝트의 FastAPI 비동기 처리 방법"
+- 출력: fastapi async processing tutorial
+
+- 입력: "최신 리액트 버전"
+- 출력: latest react version 2026
+
+## 사용자 질문
+{query}
+
+## 검색 키워드:"""
+
+    def __init__(self, vllm_api_url: str = None):
+        self.vllm_api_url = vllm_api_url or os.getenv('VLLM_API_URL', 'http://localhost:8000/v1')
+        self.client = None
+    
+    def _get_client(self) -> openai.OpenAI:
+        if self.client is None:
+            self.client = openai.OpenAI(
+                api_key='sk-not-needed',
+                base_url=self.vllm_api_url,
+                timeout=30.0
+            )
+        return self.client
+    
+    def _clean_query(self, raw_query: str) -> str:
+        """LLM 출력 정제"""
+        # 1. 마크다운 코드 블록 제거
+        cleaned = re.sub(r'```[a-z]*\n?', '', raw_query)
+        
+        # 2. 인용부호 제거
+        cleaned = cleaned.replace('"', '').replace("'", '').strip()
+        
+        # 3. 접두어 제거 (다국어)
+        prefixes = [
+            '검색 키워드:', '검색어:', 'search query:', 'query:', 
+            'keywords:', '영어 검색어:', '세탁된 검색어:'
+        ]
+        for prefix in prefixes:
+            if cleaned.lower().startswith(prefix.lower()):
+                cleaned = cleaned[len(prefix):].strip()
+        
+        # 4. 첫 줄만 추출
+        cleaned = cleaned.split('\n')[0].strip()
+        
+        # 5. 최대 길이 제한 (10 단어)
+        words = cleaned.split()
+        if len(words) > 10:
+            cleaned = ' '.join(words[:10])
+        
+        return cleaned
+    
+    async def generate_query(self, query: str) -> str:
+        """
+        검색 엔진용 쿼리 생성
+        
+        Args:
+            query: 사용자 질문
+        
+        Returns:
+            세탁된 영어 검색어
+        """
+        try:
+            prompt = self.GENERATION_PROMPT.format(query=query)
+            
+            client = self._get_client()
+            response = client.chat.completions.create(
+                model=os.getenv('LLM_MODEL_ID', 'DeepSeek-R1'),
+                messages=[
+                    {'role': 'system', 'content': '검색 키워드 생성기입니다.'},
+                    {'role': 'user', 'content': prompt}
                 ],
                 temperature=0.1,
                 max_tokens=30,
                 stream=False
             )
             
-            sanitized = response.choices[0].message.content.strip()
+            raw_output = response.choices[0].message.content.strip()
+            cleaned_query = self._clean_query(raw_output)
             
-            # ✅ 출력 정제 (오염 제거)
-            # 1. 마크다운 코드 블럭 제거
-            sanitized = sanitized.replace('```', '').strip()
-            
-            # 2. 인용부호 제거
-            sanitized = sanitized.replace('"', '').replace("'", '').strip()
-            
-            # 3. 설명 문구 제거 ("세탁된 검색어:", "영어 검색어:" 등)
-            for prefix in ['세탁된 검색어:', '영어 검색어:', 'Search query:', 'Query:']:
-                if sanitized.lower().startswith(prefix.lower()):
-                    sanitized = sanitized[len(prefix):].strip()
-            
-            # 4. 첫 줄만 추출 (여러 줄 응답 방지)
-            sanitized = sanitized.split('\n')[0].strip()
-            
-            # 5. 최대 길이 제한 (10 단어)
-            words = sanitized.split()
-            if len(words) > 10:
-                sanitized = ' '.join(words[:10])
-            
-            if sanitized:
-                logger.info(f'🧼 검색어 세탁: "{user_query}" → "{sanitized}"')
-                return sanitized
+            if cleaned_query:
+                logger.info(f'🧼 쿼리 생성: "{query}" → "{cleaned_query}"')
+                return cleaned_query
             else:
                 # Fallback: 간단한 키워드 추출
-                fallback = ' '.join(user_query.split()[:5])
-                logger.warning(f'⚠️ 세탁 결과 비어있음, Fallback 사용: "{fallback}"')
+                fallback = ' '.join(query.split()[:5])
+                logger.warning(f'⚠️ 생성 결과 비어있음, Fallback: "{fallback}"')
                 return fallback
-            
-        except Exception as e:
-            logger.error(f'❌ 검색어 세탁 실패: {str(e)}')
-            # Fallback: 간단한 키워드 추출 (5 단어)
-            fallback = ' '.join(user_query.split()[:5])
-            logger.info(f'🔄 Fallback 검색어 사용: "{fallback}"')
-            return fallback
-    
-    async def decide_and_sanitize(
-        self,
-        user_query: str,
-        internal_documents: List[Dict[str, Any]],
-        force_search: bool = False
-    ) -> str:
-        """
-        웹 검색 필요성 판단 및 검색어 세탁
-        
-        Args:
-            user_query: 사용자 질문
-            internal_documents: 내부 RAG 검색 결과
-            force_search: True일 경우 판단 스킵하고 무조건 검색어 생성
-        
-        Returns:
-            'NO_SEARCH' 또는 세탁된 검색어
-        """
-        try:
-            # Force Search: 판단 스킵
-            if force_search:
-                logger.info('🔍 강제 검색 모드: 판단 스킵 → 즉시 검색어 생성')
-                return await self.sanitize_query(user_query)
-            
-            # 내부 검색 결과 요약
-            internal_summary, avg_similarity = self._summarize_internal_results(internal_documents)
-            
-            # 프롬프트 구성 (유사도 정보 포함)
-            enhanced_summary = f"""평균 유사도: {avg_similarity:.2f}
-
-{internal_summary}"""
-            
-            prompt = self.DECISION_PROMPT.format(
-                user_query=user_query,
-                internal_summary=enhanced_summary
-            )
-            
-            # LLM 호출 (빠른 판단)
-            client = self._get_client()
-            response = client.chat.completions.create(
-                model=os.getenv('LLM_MODEL_ID', 'DeepSeek-R1'),
-                messages=[
-                    {'role': 'system', 'content': '답변 가능성 판단기입니다.'},
-                    {'role': 'user', 'content': prompt}
-                ],
-                temperature=0.0,  # ✅ 일관성 확보 (0.1 → 0.0)
-                max_tokens=50,  # 빠른 응답
-                stream=False
-            )
-            
-            decision = response.choices[0].message.content.strip()
-            
-            # 검증 및 정제
-            if 'NO_SEARCH' in decision.upper():
-                logger.info('🔍 웹 검색 판단: 내부 문서로 충분 → 웹 검색 스킵')
-                return 'NO_SEARCH'
-            else:
-                # 검색어 추출 (따옴표, 괄호 제거)
-                sanitized = decision.replace('"', '').replace("'", "").strip()
-                logger.info(f'🔍 웹 검색 판단: 필요 → 세탁된 검색어: "{sanitized}"')
-                return sanitized
                 
         except Exception as e:
-            logger.error(f'❌ 검색 판단 실패: {str(e)} → 안전하게 웹 검색 스킵')
-            return 'NO_SEARCH'
+            logger.error(f'❌ 쿼리 생성 실패: {str(e)}')
+            # Fallback
+            fallback = ' '.join(query.split()[:5])
+            logger.info(f'🔄 Fallback 쿼리: "{fallback}"')
+            return fallback
+
+
+# ==================== 3. DuckDuckGo Searcher ====================
+
+class DuckDuckGoSearcher:
+    """DuckDuckGo 웹 검색 실행"""
     
     async def search(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
         """
-        DuckDuckGo 웹 검색 수행
+        DuckDuckGo 검색 수행
         
         Args:
-            query: 검색어 (이미 세탁됨)
+            query: 검색어
             max_results: 최대 결과 수
         
         Returns:
-            검색 결과 리스트 [{'title': ..., 'body': ..., 'href': ...}, ...]
+            [{'title': ..., 'body': ..., 'href': ...}, ...]
         """
         if AsyncDDGS is None:
-            logger.error('❌ duckduckgo-search 미설치 - 웹 검색 불가')
+            logger.error('❌ duckduckgo-search 미설치')
             return []
         
         try:
-            logger.info(f'🌐 DuckDuckGo 검색 시작: "{query}"')
+            logger.info(f'🌐 DuckDuckGo 검색: "{query}"')
             
+            # ✅ Bug Fix: async with 패턴 강제
             async with AsyncDDGS() as ddgs:
-                # ✅ Fix: async for → await + for 패턴
                 search_results = await ddgs.text(query, max_results=max_results)
                 
                 results = []
@@ -302,45 +268,100 @@ class SearchDecisionMaker:
                         'href': result.get('href', '')
                     })
                 
-                logger.info(f'✅ 웹 검색 완료: {len(results)}개 결과')
+                logger.info(f'✅ 검색 완료: {len(results)}개 결과')
                 return results
                 
         except Exception as e:
             logger.error(f'❌ DuckDuckGo 검색 실패: {str(e)}')
             return []
     
-    def format_web_results(self, results: List[Dict[str, Any]]) -> str:
-        """
-        웹 검색 결과를 LLM 프롬프트용으로 포맷
-        
-        Args:
-            results: 검색 결과 리스트
-        
-        Returns:
-            포맷된 텍스트
-        """
+    def format_results(self, results: List[Dict[str, Any]]) -> str:
+        """검색 결과를 LLM용 컨텍스트로 포맷팅"""
         if not results:
             return ""
         
-        lines = ["### 웹 검색 결과 (외부 정보)\n"]
-        for i, result in enumerate(results[:3], 1):  # 상위 3개만
-            title = result.get('title', 'No title')
-            body = result.get('body', '')[:300]  # 300자 제한
-            url = result.get('href', '')
+        formatted = []
+        for i, result in enumerate(results, 1):
+            title = result.get('title', 'Untitled')
+            body = result.get('body', '')
+            href = result.get('href', '')
             
-            lines.append(f"**[웹 검색 {i}] {title}**")
-            lines.append(f"내용: {body}...")
-            lines.append(f"출처: {url}\n")
+            formatted.append(f"""[웹 검색 결과 {i}]
+제목: {title}
+내용: {body}
+출처: {href}
+""")
         
-        return '\n'.join(lines)
+        return '\n---\n'.join(formatted)
 
 
-# 싱글톤 인스턴스
-_search_decision_maker: Optional[SearchDecisionMaker] = None
+# ==================== 4. Unified Interface ====================
 
-def get_search_decision_maker() -> SearchDecisionMaker:
-    """SearchDecisionMaker 싱글톤 반환"""
-    global _search_decision_maker
-    if _search_decision_maker is None:
-        _search_decision_maker = SearchDecisionMaker()
-    return _search_decision_maker
+class WebSearchService:
+    """웹 검색 통합 인터페이스"""
+    
+    def __init__(self, vllm_api_url: str = None):
+        self.decision_maker = SearchDecisionMaker(vllm_api_url)
+        self.query_generator = QueryGenerator(vllm_api_url)
+        self.searcher = DuckDuckGoSearcher()
+    
+    async def search_if_needed(
+        self,
+        user_query: str,
+        internal_context: str,
+        force_search: bool = False
+    ) -> str:
+        """
+        조건부 웹 검색 수행
+        
+        Args:
+            user_query: 사용자 질문
+            internal_context: 내부 RAG 검색 결과
+            force_search: 강제 검색 여부
+        
+        Returns:
+            포맷된 웹 검색 결과 (또는 빈 문자열)
+        """
+        try:
+            # Step 1: 검색 필요성 판단 (강제 검색이 아닐 때만)
+            if not force_search:
+                needs_search = await self.decision_maker.needs_search(user_query, internal_context)
+                if not needs_search:
+                    logger.info('ℹ️  내부 문서로 충분 → 웹 검색 스킵')
+                    return ""
+            else:
+                logger.info('🔍 강제 검색 모드')
+            
+            # Step 2: 검색 쿼리 생성
+            search_query = await self.query_generator.generate_query(user_query)
+            
+            # Step 3: 웹 검색 실행
+            results = await self.searcher.search(search_query, max_results=5)
+            
+            # Step 4: 결과 포맷팅
+            if results:
+                formatted = self.searcher.format_results(results)
+                logger.info(f'✅ 웹 검색 완료: {len(results)}개 결과 반환')
+                return formatted
+            else:
+                logger.warning('⚠️ 웹 검색 결과 없음')
+                return ""
+                
+        except Exception as e:
+            logger.error(f'❌ 웹 검색 처리 실패: {str(e)}')
+            return ""
+
+
+# ==================== 싱글톤 인스턴스 ====================
+
+_web_search_service: Optional[WebSearchService] = None
+
+def get_web_search_service() -> WebSearchService:
+    """WebSearchService 싱글톤 반환"""
+    global _web_search_service
+    
+    if _web_search_service is None:
+        _web_search_service = WebSearchService()
+        logger.info('✅ WebSearchService 초기화 완료')
+    
+    return _web_search_service

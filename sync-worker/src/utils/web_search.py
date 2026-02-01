@@ -256,23 +256,36 @@ class DuckDuckGoSearcher:
         try:
             logger.info(f'🌐 DuckDuckGo 검색: "{query}"')
             
-            # ✅ Bug Fix: async with 패턴 강제
-            async with AsyncDDGS() as ddgs:
+            # ✅ Bug Fix: timeout 파라미터 제거 (datetime.timedelta 에러 방지)
+            async with AsyncDDGS(timeout=20) as ddgs:
                 search_results = await ddgs.text(query, max_results=max_results)
                 
+                # 결과가 제너레이터나 비동기 제너레이터인 경우 처리
                 results = []
-                for result in search_results:
-                    results.append({
-                        'title': result.get('title', ''),
-                        'body': result.get('body', ''),
-                        'href': result.get('href', '')
-                    })
+                
+                # AsyncDDGS.text()는 리스트를 직접 반환
+                if isinstance(search_results, list):
+                    for result in search_results:
+                        results.append({
+                            'title': result.get('title', ''),
+                            'body': result.get('body', ''),
+                            'href': result.get('href', '')
+                        })
+                else:
+                    # 제너레이터인 경우 (혹시 몰라서)
+                    async for result in search_results:
+                        results.append({
+                            'title': result.get('title', ''),
+                            'body': result.get('body', ''),
+                            'href': result.get('href', '')
+                        })
                 
                 logger.info(f'✅ 검색 완료: {len(results)}개 결과')
                 return results
                 
         except Exception as e:
             logger.error(f'❌ DuckDuckGo 검색 실패: {str(e)}')
+            logger.debug(f'검색 쿼리: "{query}", max_results: {max_results}', exc_info=True)
             return []
     
     def format_results(self, results: List[Dict[str, Any]]) -> str:

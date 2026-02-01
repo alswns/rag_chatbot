@@ -4,7 +4,7 @@
 3가지 핵심 역할:
 1. 벡터 DB 검색 (ChromaDB → XML 포맷 Context)
 2. 모델 관리 (vLLM 모델 정보 제공)
-3. 질의응답 (DeepSeek-R1 추론 → <think> 태그 필터링)
+3. 질의응답 (DeepSeek-R1 추론)
 
 Open WebUI와 완전 호환되는 OpenAI API 구현
 
@@ -247,7 +247,16 @@ class TokenManager:
 
         # 2️⃣ 시스템 프롬프트 조립
         if context:
-            full_system = f"{system_prompt}\n\n### Reference Context\n<context>\n{context}\n</context>\n\n위 문서를 참고하여 답변하세요."
+            full_system = f"""{system_prompt}
+            ---
+            ### 제공된 참고 문서 (Reference Context)
+            사용자의 질문에 답변하기 위해 아래의 문서들을 최우선으로 참고하세요.
+
+            <context>
+            {context}
+            </context>
+            ---
+            """
         else:
             full_system = system_prompt
 
@@ -510,18 +519,23 @@ class QuestionAnsweringManager:
     """DeepSeek-R1 기반 답변 생성 (Production-Ready)"""
     
     # ✅ 3️⃣ Structured Prompt: Context는 별도로 주입됨
-    SYSTEM_PROMPT = """당신은 한국어로 답변하는 RAG 어시스턴트입니다.
+    SYSTEM_PROMPT = """당신은 소프트웨어 엔지니어링 분야의 **수석 엔지니어(Senior Technical Lead) 어시스턴트**입니다.
+사용자의 질문에 대해 제공된 **Context(맥락)**를 바탕으로 가장 정확하고 기술적으로 깊이 있는 답변을 제공해야 합니다.
 
-## 핵심 규칙
-1. **한국어 전용**: 모든 응답은 반드시 한국어로 작성합니다. 중국어, 일본어는 절대 사용하지 마세요.
-2. **문서 기반 답변**: <context> 안의 문서 내용을 기반으로 답변합니다.
-3. **정보 없음 처리**: 문서에 관련 정보가 없으면 "제공된 문서에는 해당 정보가 없습니다."라고 답합니다.
-4. **자연스러운 대화**: 딱딱한 형식 없이 자연스럽게 설명합니다.
+## 1. 답변 원칙 (Core Principles)
+- **언어:** 설명은 **한국어(Korean)**로 하되, 기술 용어(Technical Terms), 라이브러리 명, 함수 이름 등은 **영어 원문**을 그대로 유지합니다. (예: "ROS Node를 실행합니다" (O) / "로스 노드를 실행합니다" (X))
+- **근거 기반:** 반드시 `<context>` 태그 안에 제공된 정보에 기반하여 답변합니다. 문맥에 없는 내용은 사용자의 일반적인 질문이 아닌 이상 추측해서 답하지 말고, 정보가 부족하면 솔직하게 말합니다.
+- **출처 표기:** 답변의 신뢰도를 높이기 위해, 가능한 경우 정보가 포함된 **파일 이름이나 문서 제목**을 인용합니다. (예: "`ik_solver.cpp` 파일의 로직에 따르면...")
 
-## 답변 스타일
-- 핵심 내용을 먼저 말하고 세부 사항을 설명
-- 불필요한 인사말이나 미사여구 생략
-- 기술 용어는 영어 그대로 사용 가능 (예: Docker, API)"""
+## 2. 코드 작성 가이드 (Code Guidelines)
+- **완전성:** 코드를 예시로 들 때 핵심 로직을 생략(`...`)하지 말고, 실행 가능한 형태로 작성합니다.
+- **주석:** 코드의 주요 라인에는 **한국어 주석**을 달아 동작 원리를 설명합니다.
+- **포맷:** Markdown Code Block(```language)을 반드시 사용합니다.
+
+## 3. 답변 스타일 (Style)
+- **두괄식:** 결론이나 핵심 해결책을 먼저 제시하고, 그 뒤에 상세 설명이나 근거를 덧붙입니다.
+- **구조화:** 긴 설명이 필요할 경우 번호 매기기(1., 2.)나 불렛 포인트(-)를 사용하여 가독성을 높입니다.
+- **전문성:** 초보자용 비유보다는 엔지니어 간의 대화처럼 명확하고 직관적인 기술 용어를 사용합니다."""
     
     @staticmethod
     def extract_user_message(messages: List[ChatMessage]) -> Optional[str]:
@@ -531,19 +545,7 @@ class QuestionAnsweringManager:
                 return msg.content
         return None
     
-    @staticmethod
-    def extract_think_content(text: str) -> tuple[str, str]:
-        """<think> 태그 분리"""
-        think_pattern = r'<think>(.*?)</think>'
-        match = re.search(think_pattern, text, re.DOTALL)
-        
-        if match:
-            think = match.group(1).strip()
-            response = re.sub(think_pattern, '', text, flags=re.DOTALL).strip()
-            logger.debug(f'[추론] {len(think)}자')
-            return think, response
-        
-        return "", text
+
     
     @staticmethod
     @time_logger
@@ -583,11 +585,7 @@ class QuestionAnsweringManager:
                     stop=[
                         "<|file_sep|>",
                         "### <CONTEXT>",
-                        "[관련 문서 없음]",
-                        "<｜end of sentence｜>",
-                        "好，",
-                        "首先",
-                        "接下来",
+                        "[관련 문서 없음]"
                     ],
                 )
                 
@@ -635,13 +633,9 @@ class QuestionAnsweringManager:
     
     @staticmethod
     def stream_response(response) -> Generator[str, None, None]:
-        """스트리밍 응답 생성 (중국어 필터링 포함)"""
-        chinese_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf]')
-        
+        """스트리밍 응답 생성"""
         try:
-            in_think = False
             chunk_count = 0
-            chinese_detected = False
             
             for chunk in response:
                 chunk_count += 1
@@ -656,32 +650,18 @@ class QuestionAnsweringManager:
                         
                         content = choice.delta.content
                         
-                        if '<think>' in content:
-                            in_think = True
-                        
-                        if chinese_pattern.search(content):
-                            chinese_detected = True
-                            continue
-                        
-                        if not in_think:
-                            data = {
-                                "id": f"chatcmpl-{datetime.now().timestamp()}",
-                                "object": "chat.completion.chunk",
-                                "created": int(datetime.now().timestamp()),
-                                "model": MODEL_NAME,
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {"content": content},
-                                    "finish_reason": None
-                                }]
-                            }
-                            yield f"data: {json.dumps(data)}\n\n"
-                        
-                        if '</think>' in content:
-                            in_think = False
-            
-            if chinese_detected:
-                logger.warning('⚠️ 중국어 출력 감지 및 필터링됨')
+                        data = {
+                            "id": f"chatcmpl-{datetime.now().timestamp()}",
+                            "object": "chat.completion.chunk",
+                            "created": int(datetime.now().timestamp()),
+                            "model": MODEL_NAME,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"content": content},
+                                "finish_reason": None
+                            }]
+                        }
+                        yield f"data: {json.dumps(data)}\n\n"
             
             logger.info(f'✅ 스트리밍 완료 ({chunk_count}개 청크)')
             
@@ -1046,9 +1026,8 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
                 raise HTTPException(status_code=500, detail='vLLM 응답 오류')
             
             assistant_message = response.choices[0].message.content
-            think, clean_message = QuestionAnsweringManager.extract_think_content(assistant_message)
             
-            logger.info(f'✅ 응답: {clean_message[:100]}...')
+            logger.info(f'✅ 응답: {assistant_message[:100]}...')
             
             return {
                 'id': f'chatcmpl-{datetime.now().timestamp()}',
@@ -1057,7 +1036,7 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
                 'model': MODEL_NAME,
                 'choices': [{
                     'index': 0,
-                    'message': {'role': 'assistant', 'content': clean_message},
+                    'message': {'role': 'assistant', 'content': assistant_message},
                     'finish_reason': 'stop'
                 }],
                 'usage': {

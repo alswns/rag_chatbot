@@ -338,6 +338,7 @@ class VectorSearchManager:
                 logger.info(f'🔍 드릴다운 검색 시작: "{query[:50]}..." (top_k={top_k}, rerank={ENABLE_RERANKING})')
                 
                 search_k = RERANKER_TOP_K if ENABLE_RERANKING else top_k
+                logger.info(f'🔍 drill_down_retriever.retrieve 호출: k={search_k}, use_reranking={ENABLE_RERANKING}')
                 
                 documents = drill_down_retriever.retrieve(
                     query=query,
@@ -347,6 +348,7 @@ class VectorSearchManager:
                 
                 if documents:
                     documents = documents[:top_k]
+                    logger.info(f'🔍 결과 자르기: {len(documents)}개 → {top_k}개')
                     context_xml = drill_down_retriever._format_as_xml(documents)
                     logger.info(f'✅ 드릴다운 검색 완료: {len(documents)}개 문서')
                     return context_xml

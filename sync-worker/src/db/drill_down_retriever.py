@@ -95,14 +95,18 @@ class GraphDrillDownRetriever:
         
         Args:
             query: 검색 쿼리
-            k: 최종 반환할 문서 개수
+            k: 최종 반환할 문서 개수 (원래 top_k)
             hub_k: Step 1에서 검색할 Hub 개수
             use_reranking: Cross-Encoder Reranking 사용 여부
         
         Returns:
             검색된 문서 리스트
         """
-        logger.info(f'🔍 드릴다운 검색 시작: "{query[:50]}..."')
+        # ✅ Reranking 사용시 후보 개수 확장
+        reranker_top_k = int(os.getenv('RERANKER_TOP_K', '50'))
+        candidate_k = reranker_top_k if use_reranking else k
+        
+        logger.info(f'🔍 드릴다운 검색 시작: "{query[:50]}..." (k={k}, candidate_k={candidate_k}, rerank={use_reranking})')
         
         # =====================================================
         # Step 1: Hub Node 식별 (Coarse Search)
@@ -111,7 +115,7 @@ class GraphDrillDownRetriever:
         
         if not hub_nodes:
             logger.warning('[Step 1] Hub 노드 없음 → 전역 검색으로 전환')
-            return self._global_search(query, k, use_reranking)
+            return self._global_search(query, k, candidate_k, use_reranking)
         
         best_hub = hub_nodes[0]
         logger.info(f'[Step 1] ✓ Hub 식별: "{best_hub["title"]}" (score={best_hub["score"]:.3f})')
@@ -119,7 +123,7 @@ class GraphDrillDownRetriever:
         # 점수가 임계값 미달이면 전역 검색
         if best_hub['score'] < self.hub_score_threshold:
             logger.warning(f'[Step 1] Hub 점수 미달 ({best_hub["score"]:.3f} < {self.hub_score_threshold}) → 전역 검색')
-            return self._global_search(query, k, use_reranking)
+            return self._global_search(query, k, candidate_k, use_reranking)
         
         # =====================================================
         # Step 2: 그래프 확장 및 범위 설정 (Scope Expansion)
@@ -128,7 +132,7 @@ class GraphDrillDownRetriever:
         
         if not allowed_doc_ids:
             logger.warning('[Step 2] 확장된 범위 없음 → 전역 검색으로 전환')
-            return self._global_search(query, k, use_reranking)
+            return self._global_search(query, k, candidate_k, use_reranking)
         
         logger.info(f'[Step 2] ✓ 범위 설정: {len(allowed_doc_ids)}개 노드')
         
@@ -138,13 +142,15 @@ class GraphDrillDownRetriever:
         results = self._scoped_search(
             query=query,
             allowed_doc_ids=allowed_doc_ids,
-            k=k,
+            k=candidate_k,  # ✅ 후보 개수 사용
             use_reranking=use_reranking
         )
         
-        logger.info(f'[Step 3] ✓ 정밀 검색 완료: {len(results)}개 문서 반환')
+        # ✅ 최종 k개로 자르기
+        final_results = results[:k]
+        logger.info(f'[Step 3] ✓ 정밀 검색 완료: {len(final_results)}개 문서 반환 (후보 {len(results)}개에서 선택)')
         
-        return results
+        return final_results
     
     def _find_hub_nodes(
         self,
@@ -491,24 +497,27 @@ class GraphDrillDownRetriever:
         self,
         query: str,
         k: int,
+        candidate_k: int,
         use_reranking: bool
     ) -> List[RetrievedDocument]:
         """
         Fallback: 전역 검색
         
         Hub 식별 실패 시 전체 범위에서 검색
+        
+        Args:
+            k: 최종 반환할 문서 개수
+            candidate_k: 검색할 후보 문서 개수
         """
         logger.info('[Fallback] 전역 검색 수행')
         
         try:
-            # ✅ RERANKER_TOP_K 환경변수 활용
-            reranker_top_k = int(os.getenv('RERANKER_TOP_K', '50'))
-            search_top_k = reranker_top_k if use_reranking else k
+            logger.info(f'[Fallback] 파라미터: k={k}, candidate_k={candidate_k}, use_reranking={use_reranking}')
             
             # 기존 vector_store의 search 메서드 활용
             results = self.vector_store.search(
                 query=query,
-                top_k=search_top_k,
+                top_k=candidate_k,  # ✅ 후보 개수 사용
                 use_hybrid=True,
                 use_graph=True,
                 use_reranking=use_reranking
@@ -525,7 +534,11 @@ class GraphDrillDownRetriever:
                     source_step='global'
                 ))
             
-            return documents
+            # ✅ 최종 k개로 자르기
+            final_documents = documents[:k]
+            logger.info(f'[Fallback] ✅ 전역 검색 완료: {len(final_documents)}개 반환 (후보 {len(documents)}개에서 선택)')
+            
+            return final_documents
             
         except Exception as e:
             logger.error(f'전역 검색 실패: {str(e)}')

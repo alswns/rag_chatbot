@@ -231,78 +231,63 @@ class TokenManager:
         context: str,
         current_query: str,
         history: List[ChatMessage],
-        max_tokens: int = MAX_CONTEXT_TOKENS
+        max_tokens: int = 8192 # vLLM 설정값
     ) -> List[Dict[str, str]]:
         """
-        ✅ 동적 컨텍스트 윈도우 관리
-        
-        토큰 예산 내에서 최대한 많은 히스토리를 포함
-        
-        Args:
-            system_prompt: 시스템 프롬프트
-            context: 검색된 문서 컨텍스트
-            current_query: 현재 사용자 질문
-            history: 과거 대화 히스토리
-            max_tokens: 최대 허용 토큰 수
-        
-        Returns:
-            최적화된 메시지 리스트
+        ✅ [완전판] 토큰 예산 내에서 출력 공간을 보장하며 히스토리 관리
         """
-        messages = []
-        
-        # =====================================================
-        # Step 1: 고정 비용 계산 (System + Context + Current)
-        # =====================================================
-        
-        # 3️⃣ Structured Prompt: System Prompt에 Context 주입
+        # 1️⃣ 출력(답변) 공간 예약 (매우 중요!)
+        # 모델이 답변을 생성할 공간을 최소 2,048 토큰은 남겨둬야 합니다.
+        RESERVED_OUTPUT = 2048 
+        effective_limit = max_tokens - RESERVED_OUTPUT 
+
+        # 2️⃣ 시스템 프롬프트 조립
         if context:
-            full_system = f"""{system_prompt}
-
-### Reference Context
-<context>
-{context}
-</context>
-
-위 문서를 참고하여 사용자 질문에 답변하세요."""
+            full_system = f"{system_prompt}\n\n### Reference Context\n<context>\n{context}\n</context>\n\n위 문서를 참고하여 답변하세요."
         else:
             full_system = system_prompt
-        
+
+        # 3️⃣ 고정 비용 계산 (시스템 + 현재 질문)
+        # 🌟 한글은 TokenManager.estimate_tokens에서 글자수 * 2.5~3배로 잡아야 안전합니다.
         system_tokens = TokenManager.estimate_tokens(full_system)
         query_tokens = TokenManager.estimate_tokens(current_query)
         
-        fixed_tokens = system_tokens + query_tokens + 20  # 여유분
-        remaining_tokens = max_tokens - fixed_tokens
+        fixed_tokens = system_tokens + query_tokens + 50 # 여유분 살짝 추가
         
-        logger.debug(f'토큰 예산: 전체={max_tokens}, 고정={fixed_tokens}, 히스토리용={remaining_tokens}')
+        # 🚨 [예외 처리] 만약 컨텍스트+질문 만으로 이미 한계를 넘었다면?
+        if fixed_tokens > effective_limit:
+            logger.warning(f"⚠️ 컨텍스트가 너무 길어 자릅니다. ({fixed_tokens} > {effective_limit})")
+            # 이 경우 context 문자열 자체를 슬라이싱해서 강제로 줄이는 로직이 필요할 수 있습니다.
+            fixed_tokens = effective_limit 
+
+        remaining_tokens = effective_limit - fixed_tokens
         
-        # =====================================================
-        # Step 2: 히스토리 동적 포함 (최신 → 과거 순)
-        # =====================================================
-        
+        logger.debug(f'📊 토큰 예산: 가용={effective_limit}, 고정={fixed_tokens}, 히스토리용={remaining_tokens}')
+
+        # 4️⃣ 히스토리 동적 포함 (최신 → 과거)
         selected_history = []
         history_tokens = 0
         
-        # 역순으로 순회하며 토큰 예산 내에서 추가
-        for msg in reversed(history):
-            msg_tokens = TokenManager.estimate_tokens(msg.content) + 4  # role 포함
+        # 🌟 히스토리가 너무 많으면(예: 52개) 모델이 혼란스러우니 최대 10개 정도로 제한하는 것을 권장합니다.
+        max_history_count = 10 
+        
+        for msg in reversed(history[-max_history_count:]):
+            msg_tokens = TokenManager.estimate_tokens(msg.content) + 10
             
             if history_tokens + msg_tokens <= remaining_tokens:
                 selected_history.insert(0, {'role': msg.role, 'content': msg.content})
                 history_tokens += msg_tokens
             else:
-                # 토큰 예산 초과 시 중단
                 break
         
-        # =====================================================
-        # Step 3: 최종 메시지 조립
-        # =====================================================
-        
-        messages.append({'role': 'system', 'content': full_system})
+        # 5️⃣ 최종 메시지 조립
+        messages = [{'role': 'system', 'content': full_system}]
         messages.extend(selected_history)
         messages.append({'role': 'user', 'content': current_query})
         
-        total_tokens = TokenManager.estimate_messages_tokens(messages)
-        logger.info(f'📊 토큰 관리: 히스토리 {len(selected_history)}개 포함, 총 ~{total_tokens} 토큰')
+        # 최종 확인 로그
+        final_input_tokens = TokenManager.estimate_messages_tokens(messages)
+        logger.info(f'✅ 토큰 관리 완료: 히스토리 {len(selected_history)}개, 예측 총합 ~{final_input_tokens} (한도 {max_tokens})')
         
         return messages
 

@@ -362,7 +362,8 @@ class WebSearchService:
         self,
         user_query: str,
         internal_context: str,
-        force_search: bool = False
+        force_search: bool = False,
+        history: List[Dict[str, str]] = None
     ) -> str:
         """
         조건부 웹 검색 수행
@@ -371,6 +372,7 @@ class WebSearchService:
             user_query: 사용자 질문
             internal_context: 내부 RAG 검색 결과
             force_search: 강제 검색 여부
+            history: 대화 히스토리
         
         Returns:
             포맷된 웹 검색 결과 (또는 빈 문자열)
@@ -385,8 +387,8 @@ class WebSearchService:
             else:
                 logger.info('🔍 강제 검색 모드')
             
-            # Step 2: 검색 쿼리 생성
-            search_query = await self.query_generator.generate_query(user_query)
+            # Step 2: 검색 쿼리 생성 (히스토리 전달)
+            search_query = await self.query_generator.generate_query(user_query, history=history)
             
             # Step 3: 웹 검색 실행
             results = await self.searcher.search(search_query, max_results=5)

@@ -69,12 +69,15 @@ services:
     container_name: rag-chromadb
 
     environment:
-      - PERSIST_DIRECTORY=/chroma/data
+      # ✅ 최신 ChromaDB는 IS_PERSISTENT + PERSIST_DIRECTORY 사용
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/data
       - ANONYMIZED_TELEMETRY=false
       - CHROMA_SERVER_AUTH_ENABLED=false
 
     volumes:
-      - ./data/chroma:/chroma/data
+      # ✅ ChromaDB 기본 경로: /data
+      - ./data/chroma:/data
 
     ports:
       - "8001:8000"
@@ -85,7 +88,7 @@ services:
     restart: unless-stopped
 
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
       interval: 30s
       timeout: 10s
       retries: 3

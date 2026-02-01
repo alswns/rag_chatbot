@@ -35,6 +35,20 @@ except ImportError:
     from db import VectorStoreManager
 
 try:
+    from db.drill_down_retriever import GraphDrillDownRetriever, create_drill_down_retriever
+except ImportError:
+    GraphDrillDownRetriever = None
+    create_drill_down_retriever = None
+
+try:
+    from utils.intent_router import ScalableIntentRouter, Intent, Domain, get_intent_router
+except ImportError:
+    ScalableIntentRouter = None
+    Intent = None
+    Domain = None
+    get_intent_router = None
+
+try:
     from processors.graph_rag import GraphRAGProcessor
 except ImportError:
     GraphRAGProcessor = None
@@ -78,6 +92,8 @@ logger.info(f'✅ LLM Backend: {LLM_BACKEND.upper()}')
 
 vector_store: Optional[VectorStoreManager] = None
 graph_processor: Optional['GraphRAGProcessor'] = None
+drill_down_retriever: Optional['GraphDrillDownRetriever'] = None
+intent_router: Optional['ScalableIntentRouter'] = None
 vllm_client: Optional[openai.OpenAI] = None
 available_models: List[Dict[str, Any]] = []
 
@@ -109,43 +125,134 @@ class ChatCompletionResponse(BaseModel):
 # ==================== 1️⃣ 벡터 DB 검색 (RAG) ====================
 
 class VectorSearchManager:
-    """ChromaDB 벡터 검색 담당"""
+    """
+    ✅ [업그레이드] Intent Router + Drill-Down Retriever 통합
+    
+    검색 플로우:
+    1. Intent Router: 쿼리 의도 분류 (search_knowledge/chat/summary)
+    2. Drill-Down Retriever: 3단계 드릴다운 검색
+    3. 컨텍스트 포맷팅: XML 형식으로 반환
+    """
     
     @staticmethod
     def search(query: str, top_k: int = SEARCH_TOP_K) -> str:
         """
-        ✅ [Full Page Retrieval 적용] 벡터 DB에서 관련 문서 검색
-        
-        페이지 전체 문맥을 복원하여 반환합니다.
+        ✅ [통합 검색] Intent 기반 라우팅 + 드릴다운 검색
         
         Args:
             query: 검색 질문
-            top_k: 힌트가 될 조각 개수 (전체 페이지를 다 가져오므로 2-3개로 충분)
+            top_k: 반환할 문서 개수
         
         Returns:
-            마크다운 형식의 컨텍스트 (페이지 전체 복원됨)
+            XML 형식의 컨텍스트
         """
         if vector_store is None:
             logger.warning('❌ Vector Store 미초기화')
             return ""
         
         try:
-            logger.info(f'🔍 페이지 전체 검색 시작: "{query[:50]}..." (top_k={top_k})')
+            # =====================================================
+            # Step 1: Intent 분류 (의도 파악)
+            # =====================================================
+            intent_result = None
+            if intent_router is not None:
+                intent_result = intent_router.route(query)
+                logger.info(f'🎯 Intent: {intent_result.intent} | Domain: {intent_result.domain} | Conf: {intent_result.confidence:.2f}')
+                
+                # 일상 대화는 검색 불필요
+                if intent_result.intent == 'chat':
+                    logger.info('💬 일상 대화 감지 → 검색 스킵')
+                    return ""
             
-            # ✅ retrieve_context: 조각을 찾고 페이지 전체를 복원하여 반환
+            # =====================================================
+            # Step 2: Drill-Down 검색 (3단계 드릴다운)
+            # =====================================================
+            if drill_down_retriever is not None:
+                logger.info(f'🔍 드릴다운 검색 시작: "{query[:50]}..." (top_k={top_k})')
+                
+                documents, context_xml = drill_down_retriever.retrieve_with_context(
+                    query=query,
+                    k=top_k,
+                    context_format='xml'
+                )
+                
+                if documents:
+                    logger.info(f'✅ 드릴다운 검색 완료: {len(documents)}개 문서')
+                    return context_xml
+                else:
+                    logger.info('⚠️ 드릴다운 검색 결과 없음 → Fallback')
+            
+            # =====================================================
+            # Step 3: Fallback - 기존 검색 방식
+            # =====================================================
+            logger.info(f'🔍 Fallback 검색: "{query[:50]}..." (top_k={top_k})')
+            
+            # 기존 retrieve_context 사용
             context = vector_store.retrieve_context(query, top_k=top_k, use_hybrid=True)
             
             if not context:
-                logger.info('⚠️  검색 결과 없음')
+                logger.info('⚠️ 검색 결과 없음')
                 return ""
             
             logger.info(f'✅ 컨텍스트 생성 완료: {len(context)}자')
-            
             return context
             
         except Exception as e:
-            logger.error(f'❌ 페이지 검색 실패: {str(e)}', exc_info=True)
+            logger.error(f'❌ 검색 실패: {str(e)}', exc_info=True)
             return ""
+    
+    @staticmethod
+    def search_with_intent(query: str, top_k: int = SEARCH_TOP_K) -> Dict[str, Any]:
+        """
+        ✅ [상세 버전] Intent 정보와 함께 검색 결과 반환
+        
+        Returns:
+            {
+                'intent': {...},
+                'documents': [...],
+                'context': '...',
+                'search_type': 'drill_down' | 'fallback'
+            }
+        """
+        result = {
+            'intent': None,
+            'documents': [],
+            'context': '',
+            'search_type': 'fallback'
+        }
+        
+        if vector_store is None:
+            return result
+        
+        try:
+            # Intent 분류
+            if intent_router is not None:
+                intent_result = intent_router.route(query)
+                result['intent'] = intent_result.to_dict()
+                
+                if intent_result.intent == 'chat':
+                    result['search_type'] = 'skip'
+                    return result
+            
+            # Drill-Down 검색
+            if drill_down_retriever is not None:
+                documents = drill_down_retriever.retrieve(query, k=top_k)
+                if documents:
+                    result['documents'] = [doc.to_dict() for doc in documents]
+                    result['context'] = drill_down_retriever._format_as_xml(documents)
+                    result['search_type'] = 'drill_down'
+                    return result
+            
+            # Fallback
+            context = vector_store.retrieve_context(query, top_k=top_k, use_hybrid=True)
+            result['context'] = context
+            result['search_type'] = 'fallback'
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f'❌ 검색 실패: {str(e)}')
+            return result
 
 
 # ==================== 2️⃣ 모델 관리 ====================
@@ -355,14 +462,14 @@ class QuestionAnsweringManager:
 @app.on_event('startup')
 async def startup():
     """서버 시작"""
-    global vector_store, graph_processor
+    global vector_store, graph_processor, drill_down_retriever, intent_router
     
     logger.info('=' * 70)
     logger.info('RAG API 시작 중...')
     logger.info('=' * 70)
     
     try:
-        # 벡터 DB 초기화
+        # 1️⃣ 벡터 DB 초기화
         logger.info('1️⃣  벡터 DB 초기화...')
         vector_store = VectorStoreManager(
             chroma_host=CHROMA_HOST,
@@ -371,24 +478,55 @@ async def startup():
         stats = vector_store.get_collection_stats()
         logger.info(f'✅ 벡터 DB 준비: {stats.get("document_count", 0)}개 문서')
         
-        # 그래프 로드
+        # 2️⃣ 그래프 로드
         logger.info('2️⃣  그래프 로드...')
+        graph = None
         if GraphRAGProcessor and os.path.exists(GRAPH_PERSIST_PATH):
             graph_processor = GraphRAGProcessor.from_file(GRAPH_PERSIST_PATH)
             if graph_processor:
-                logger.info(f'✅ 그래프 로드 완료: {graph_processor.graph.number_of_nodes()}개 노드, {graph_processor.graph.number_of_edges()}개 엣지')
+                graph = graph_processor.graph
+                logger.info(f'✅ 그래프 로드 완료: {graph.number_of_nodes()}개 노드, {graph.number_of_edges()}개 엣지')
             else:
                 logger.warning('⚠️  그래프 로드 실패 - 벡터 검색만 사용')
         else:
             logger.info('ℹ️  그래프 파일 없음 - 벡터 검색만 사용')
         
-        # 모델 정보 로드
-        logger.info('3️⃣  모델 정보 로드...')
+        # 3️⃣ Intent Router 초기화
+        logger.info('3️⃣  Intent Router 초기화...')
+        if ScalableIntentRouter is not None:
+            intent_router = ScalableIntentRouter(
+                active_domains=['notion'],  # 현재 Notion만 활성화
+                use_llm_fallback=False       # 규칙 기반만 사용 (속도 최적화)
+            )
+            logger.info(f'✅ Intent Router 준비: 활성 도메인 = {intent_router.active_domains}')
+        else:
+            logger.warning('⚠️  Intent Router 미사용')
+        
+        # 4️⃣ Drill-Down Retriever 초기화
+        logger.info('4️⃣  Drill-Down Retriever 초기화...')
+        if GraphDrillDownRetriever is not None and graph is not None:
+            drill_down_retriever = GraphDrillDownRetriever(
+                vector_store=vector_store,
+                graph=graph,
+                hub_types=['page', 'root'],
+                hub_score_threshold=0.3,
+                include_mention_depth=1
+            )
+            logger.info(f'✅ Drill-Down Retriever 준비')
+        else:
+            logger.info('ℹ️  Drill-Down Retriever 미사용 (그래프 없음)')
+        
+        # 5️⃣ 모델 정보 로드
+        logger.info('5️⃣  모델 정보 로드...')
         models = ModelManager.get_models()
         logger.info(f'✅ {len(models)}개 모델 감지')
         
         logger.info('=' * 70)
         logger.info('🚀 RAG API 준비 완료!')
+        logger.info(f'   - Vector Store: ✅ ({stats.get("document_count", 0)}개 문서)')
+        logger.info(f'   - Graph: {"✅" if graph else "❌"}')
+        logger.info(f'   - Intent Router: {"✅" if intent_router else "❌"}')
+        logger.info(f'   - Drill-Down Retriever: {"✅" if drill_down_retriever else "❌"}')
         logger.info('=' * 70)
         
     except Exception as e:
@@ -419,7 +557,13 @@ async def health_check() -> Dict:
             'vector_store': stats,
             'graph': graph_stats,
             'model': MODEL_NAME,
-            'documents': stats.get('document_count', 0)
+            'documents': stats.get('document_count', 0),
+            'components': {
+                'vector_store': vector_store is not None,
+                'graph': graph_processor is not None,
+                'intent_router': intent_router is not None,
+                'drill_down_retriever': drill_down_retriever is not None
+            }
         }
     except Exception as e:
         logger.error(f'❌ 헬스 체크 실패: {str(e)}')
@@ -440,6 +584,41 @@ async def list_models() -> Dict:
     }
 
 
+# ==================== 디버그 엔드포인트 ====================
+
+@app.post('/v1/search')
+async def search_documents(query: str, top_k: int = 5) -> Dict:
+    """
+    ✅ [디버그용] 검색 결과 확인 엔드포인트
+    
+    Intent Router + Drill-Down Retriever 동작 확인용
+    """
+    logger.info(f'🔍 /v1/search 요청: "{query[:50]}..."')
+    
+    result = VectorSearchManager.search_with_intent(query, top_k=top_k)
+    
+    return {
+        'query': query,
+        'intent': result.get('intent'),
+        'search_type': result.get('search_type'),
+        'document_count': len(result.get('documents', [])),
+        'documents': result.get('documents', [])[:3],  # 상위 3개만 반환
+        'context_length': len(result.get('context', ''))
+    }
+
+
+@app.post('/v1/intent')
+async def analyze_intent(query: str) -> Dict:
+    """
+    ✅ [디버그용] Intent 분석 엔드포인트
+    """
+    if intent_router is None:
+        return {'error': 'Intent Router not initialized'}
+    
+    result = intent_router.route(query)
+    return result.to_dict()
+
+
 @app.post('/v1/chat/completions')
 async def chat_completions(request: ChatCompletionRequest) -> Any:
     """
@@ -447,7 +626,7 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
     
     플로우:
     1. 사용자 질문 추출
-    2. ChromaDB에서 관련 문서 검색 (XML 포맷)
+    2. Intent 분류 → Drill-Down 검색
     3. System Prompt + Context + Query 구성
     4. vLLM (DeepSeek-R1) 호출
     5. <think> 태그 필터링

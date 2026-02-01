@@ -97,18 +97,13 @@ else
     echo -e "  ${RED}✗ graph.pkl 없음${NC}"
 fi
 
-# ChromaDB 경로 자동 감지 (open-webui/vector_db 우선)
-CHROMA_PATH=""
-if [ -d "data/open-webui/vector_db" ] && [ "$(ls -A data/open-webui/vector_db 2>/dev/null)" ]; then
-    CHROMA_PATH="data/open-webui/vector_db"
-    CHROMA_SIZE=$(du -sh "$CHROMA_PATH" | cut -f1)
-    echo -e "  ${GREEN}✓ ChromaDB (open-webui): ${CHROMA_SIZE}${NC}"
-elif [ -d "data/chroma" ] && [ "$(ls -A data/chroma 2>/dev/null)" ]; then
-    CHROMA_PATH="data/chroma"
-    CHROMA_SIZE=$(du -sh "$CHROMA_PATH" | cut -f1)
-    echo -e "  ${GREEN}✓ ChromaDB (chroma): ${CHROMA_SIZE}${NC}"
+# ChromaDB 경로: data/chroma (docker-compose 표준 경로)
+if [ -d "data/chroma" ] && [ "$(ls -A data/chroma 2>/dev/null)" ]; then
+    CHROMA_SIZE=$(du -sh data/chroma | cut -f1)
+    echo -e "  ${GREEN}✓ ChromaDB: ${CHROMA_SIZE}${NC}"
 else
-    echo -e "  ${RED}✗ ChromaDB 데이터 없음${NC}"
+    echo -e "  ${YELLOW}⚠ data/chroma 비어있음 (동기화 먼저 실행 필요)${NC}"
+    echo -e "    → ./scripts/sync-data.sh -d 실행 후 다시 시도하세요"
 fi
 
 # 2. SSH 연결 테스트
@@ -124,7 +119,7 @@ fi
 
 # 3. 원격 디렉토리 준비
 echo -e "\n${YELLOW}[3/5] 원격 디렉토리 준비 중...${NC}"
-$SSH_CMD ${REMOTE_USER}@${REMOTE_HOST} "mkdir -p ${REMOTE_PATH}/data/chroma ${REMOTE_PATH}/data/open-webui/vector_db"
+$SSH_CMD ${REMOTE_USER}@${REMOTE_HOST} "mkdir -p ${REMOTE_PATH}/data/chroma"
 echo -e "${GREEN}✓ 원격 디렉토리 생성 완료${NC}"
 
 # 4. 데이터 전송
@@ -155,29 +150,13 @@ if [ -f "data/sync_progress.json" ]; then
         ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/data/
 fi
 
-# ChromaDB 전송 (감지된 경로 사용)
-if [ -n "$CHROMA_PATH" ]; then
-    echo -e "${BLUE}  ChromaDB ($CHROMA_PATH) 전송 중...${NC}"
-    
-    if [ "$CHROMA_PATH" = "data/open-webui/vector_db" ]; then
-        # open-webui/vector_db → 서버의 동일 경로로 전송
-        rsync $RSYNC_OPTS --delete \
-            -e "ssh -i ${SSH_KEY/#\~/$HOME} -p ${REMOTE_PORT}" \
-            data/open-webui/vector_db/ \
-            ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/data/open-webui/vector_db/
-        
-        # 서버의 data/chroma에도 복사 (docker-compose-server.yml 호환)
-        echo -e "${BLUE}  → data/chroma에도 복사 (서버 호환용)...${NC}"
-        rsync $RSYNC_OPTS --delete \
-            -e "ssh -i ${SSH_KEY/#\~/$HOME} -p ${REMOTE_PORT}" \
-            data/open-webui/vector_db/ \
-            ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/data/chroma/
-    else
-        rsync $RSYNC_OPTS --delete \
-            -e "ssh -i ${SSH_KEY/#\~/$HOME} -p ${REMOTE_PORT}" \
-            data/chroma/ \
-            ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/data/chroma/
-    fi
+# ChromaDB 전송 (data/chroma → 서버의 data/chroma)
+echo -e "${BLUE}  ChromaDB (data/chroma) 전송 중...${NC}"
+if [ -d "data/chroma" ] && [ "$(ls -A data/chroma 2>/dev/null)" ]; then
+    rsync $RSYNC_OPTS --delete \
+        -e "ssh -i ${SSH_KEY/#\~/$HOME} -p ${REMOTE_PORT}" \
+        data/chroma/ \
+        ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/data/chroma/
 else
     echo -e "${YELLOW}  ChromaDB 데이터 없음 (스킵)${NC}"
 fi

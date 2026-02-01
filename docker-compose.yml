@@ -74,14 +74,15 @@ services:
     container_name: rag-chromadb
 
     environment:
-      # 데이터 영속성
-      - PERSIST_DIRECTORY=/chroma/data
+      # ✅ 최신 ChromaDB는 IS_PERSISTENT + PERSIST_DIRECTORY 사용
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/data
       - ANONYMIZED_TELEMETRY=false
       - CHROMA_SERVER_AUTH_ENABLED=false
 
     volumes:
-      # ✅ 벡터 DB 데이터 영속화
-      - chroma-data:/chroma/data
+      # ✅ ChromaDB 기본 경로: /data
+      - chroma-data:/data
 
     ports:
       - "8001:8000"

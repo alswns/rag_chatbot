@@ -7,10 +7,16 @@
 
 set -e
 
-# 스크립트 위치 기준 경로 설정
+# 스크립트 위치 기준 경로 설정 및 git pull
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
+
+# 최신 코드 자동 pull
+if [ -d .git ]; then
+    echo -e "${YELLOW}[0/4] git pull로 최신 코드 동기화...${NC}"
+    git pull --rebase --autostash || true
+fi
 
 # 색상 정의
 RED='\033[0;31m'
@@ -35,17 +41,17 @@ else
     exit 1
 fi
 
-# 2. 환경변수 확인
+# 2. 환경변수 확인 (.env가 git 루트에 위치해야 함)
 echo -e "\n${YELLOW}[2/4] 환경변수 확인 중...${NC}"
 if [ ! -f ".env" ]; then
-    echo -e "${RED}✗ .env 파일이 없습니다${NC}"
+    echo -e "${RED}✗ .env 파일이 없습니다 (git 루트에 위치해야 함)${NC}"
     echo -e "${YELLOW}  .env.example을 복사하여 설정하세요${NC}"
     exit 1
 fi
 source .env
 echo -e "${GREEN}✓ .env 로드 완료${NC}"
 
-# 3. 데이터 디렉토리 확인
+# 3. 데이터 디렉토리 확인 (git 루트 하위 data)
 echo -e "\n${YELLOW}[3/4] 데이터 디렉토리 확인 중...${NC}"
 mkdir -p data/chroma
 if [ -f "data/graph.pkl" ]; then

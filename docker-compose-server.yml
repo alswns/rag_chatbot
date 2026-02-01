@@ -57,7 +57,7 @@ services:
     restart: unless-stopped
 
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -86,12 +86,6 @@ services:
       - rag-network
 
     restart: unless-stopped
-
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
   # ==================== RAG API Server ====================
   rag-api:
@@ -134,18 +128,10 @@ services:
     command: python -u src/server.py
 
     depends_on:
-      vllm:
-        condition: service_healthy
-      chromadb:
-        condition: service_healthy
+      - vllm
+      - chromadb
 
     restart: unless-stopped
-
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
   # ==================== Open WebUI ====================
   open-webui:

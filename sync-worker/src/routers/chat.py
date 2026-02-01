@@ -69,28 +69,19 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
             # 조건부 웹 검색
             web_context = ""
             
-            # ✅ Pre-check: 내부 검색 품질 평가 (즉시 웹 검색 판단)
+            # ✅ Pre-check: 내부 검색 품질 평가 (문서 길이만 확인)
             force_web_search = False
             context_length = len(context)
             
-            # 1. 문서 길이 기반 판단
+            # 문서 길이 기반 판단만 유지 (유사도 판단 제거)
             if context_length == 0:
                 logger.info('🔍 Pre-check: 내부 문서 없음 → 강제 웹 검색')
                 force_web_search = True
-            elif context_length < 300:
-                logger.info(f'🔍 Pre-check: 내부 문서 부족 ({context_length}자 < 300자) → 강제 웹 검색')
+            elif context_length < 200:
+                logger.info(f'🔍 Pre-check: 내부 문서 부족 ({context_length}자 < 200자) → 강제 웹 검색')
                 force_web_search = True
-            
-            # 2. 유사도 기반 판단 (문서의 질 평가)
-            if not force_web_search and VectorSearchManager._last_search_results:
-                scores = [doc.get('score', 0.0) for doc in VectorSearchManager._last_search_results]
-                avg_score = sum(scores) / len(scores) if scores else 0.0
-                
-                if avg_score < 0.6:
-                    logger.info(f'🚨 Pre-check: 평균 유사도 낙점 ({avg_score:.2f} < 0.6) → 강제 웹 검색')
-                    force_web_search = True
-                else:
-                    logger.info(f'✅ Pre-check: 평균 유사도 양호 ({avg_score:.2f})')
+            else:
+                logger.info(f'✅ Pre-check: 내부 문서 충분 ({context_length}자) → LLM 판단 요청')
             
             try:
                 from utils.web_search import get_search_decision_maker

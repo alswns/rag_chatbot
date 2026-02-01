@@ -36,51 +36,54 @@ class SearchDecisionMaker:
     - 검색어에서 민감 정보 제거 (프로젝트명, 변수명, IP, 경로 등)
     """
     
-    # 🔒 검색 판단 프롬프트 (보안 강화)
-    DECISION_PROMPT = """당신은 **보안 검색 어시스턴트**입니다.
+    # 🎯 Answerability Check Prompt (정답 충족성 중심)
+    DECISION_PROMPT = """당신은 **답변 가능성 판단기(Answerability Judge)**입니다.
 
 ## 작업
-사용자 질문과 내부 검색 결과를 분석하여 **웹 검색이 필요한지** 판단하세요.
+사용자 질문과 [내부 문서 요약]을 대조하여, **질문에 대한 구체적인 정답**이 있는지 판단하세요.
 
-## ⚠️ 중요: 비판적 평가 원칙
-1. **구체적 정답이 없으면 검색하라**
-   - 단순히 키워드가 겹친다고 답변 가능하다고 판단하지 마세요.
-   - 예: "파이썬 버전"이라는 단어만 있고 **구체적 숫자(3.11, 3.12)**가 없으면 불충분!
+## 판단 기준 (Exact Answer Rule)
 
-2. **내부 지식을 사용하지 마라**
-   - 오직 제공된 [Context] 안에 정보가 있는지**만** 확인하세요.
-   - LLM의 사전 학습 지식으로 추측하지 마세요.
+### 1️⃣ **직접적 정답 유무 확인**
+- ❌ **나쁨 예:**
+  - 질문: "최신 리액트 버전이 뭐야?"
+  - 문서: "리액트 16 사용 중" (주제는 같지만 '최신' 정보 없음)
+  - 판단: **SEARCH** → `latest react version 2026`
 
-3. **최신 정보는 웹 검색 필수**
-   - "최신", "현재", "2025년", "최근" 등의 시간성 표현이 있으면 즉시 검색.
+- ❌ **나쁨 예:**
+  - 질문: "S3 버킷 생성 방법 알려줘"
+  - 문서: "S3 버킷 이름은 'my-bucket'이다" (설정값만 있고 '생성 방법' 없음)
+  - 판단: **SEARCH** → `aws s3 create bucket tutorial`
 
-## 판단 기준
-1. **내부 문서가 충분함** (웹 검색 불필요)
-   - 질문에 **직접적으로** 답할 수 있는 구체적 정보가 있음
-   - 문서에 상세한 설명/코드/가이드 포함
-   - 유사도가 **0.7 이상**이고 관련성이 명확함
-   → 반환: "NO_SEARCH"
+- ✅ **좋은 예:**
+  - 질문: "우리 프로젝트 서버 IP 뭐야?"
+  - 문서: "Server IP: 10.0.0.1" (직접적 정답 있음)
+  - 판단: **NO_SEARCH**
 
-2. **내부 문서가 불충분함** (웹 검색 필요)
-   - 문서가 아예 없거나 관련성이 낮음
-   - 일반적인 기술 질문/개념 설명이 필요함
-   - 최신 정보가 필요함 (버전, 업데이트 등)
-   - **부분적 정보**만 있음 (예: 개념 언급만 있고 구체적 방법 없음)
-   → 반환: 세탁된 영어 검색어
+### 2️⃣ **외부 지식 규칙 (External Knowledge Rule)**
+다음 유형의 질문은 무조건 웹 검색:
+- "최신 뉴스", "현재 트렌드", "2026년 기준"
+- 일반 상식/개념 설명 (예: "머신러닝이 뭐야?")
+- 외부 라이브러리 사용법 (예: "FastAPI 비동기 처리 방법")
+- 비교 분석 (예: "React vs Vue 장단점")
 
-## 🔒 보안 규칙 (절대 준수)
-웹 검색어에 다음을 **절대 포함하지 마세요**:
-- 프로젝트명 (예: "rag_chatbot", "my-project")
-- 파일/경로 (예: "/src/main.py", "config.json")
-- 변수/함수명 (예: "get_user_data", "API_KEY")
-- IP/도메인 (예: "192.168.1.1", "internal.company.com")
-- 조직명 (예: "우리팀", "회사")
+### 3️⃣ **키워드 겹침 함정 경계**
+- 문서에 키워드만 언급되고 **구체적 수치/방법/코드**가 없으면 → **SEARCH**
+- 예: "파이썬 버전" 단어만 있고 "3.11", "3.12" 같은 숫자 없음 → 불충분
 
-**일반적인 기술 용어만 사용하세요!**
+## 🔒 보안 규칙 (검색어 세탁)
+웹 검색어에 **절대 포함 금지**:
+- 프로젝트명, 파일명, 변수명
+- IP 주소, 내부 도메인
+- 조직명, 팀명
+
+**일반적인 기술 용어만 사용!**
 
 ## 출력 형식
-- 웹 검색 불필요: "NO_SEARCH"
-- 웹 검색 필요: "영어 검색어" (3-5 단어, 일반 기술 용어만)
+- 내부 문서로 충분: `NO_SEARCH`
+- 외부 검색 필요: `영어 검색어` (3-5 단어)
+
+---
 
 ## 사용자 질문
 {user_query}
@@ -167,14 +170,42 @@ class SearchDecisionMaker:
             )
             
             sanitized = response.choices[0].message.content.strip()
-            sanitized = sanitized.replace('"', '').replace("'", "").strip()
-            logger.info(f'🧼 검색어 세탁: "{user_query}" → "{sanitized}"')
-            return sanitized
+            
+            # ✅ 출력 정제 (오염 제거)
+            # 1. 마크다운 코드 블럭 제거
+            sanitized = sanitized.replace('```', '').strip()
+            
+            # 2. 인용부호 제거
+            sanitized = sanitized.replace('"', '').replace("'", '').strip()
+            
+            # 3. 설명 문구 제거 ("세탁된 검색어:", "영어 검색어:" 등)
+            for prefix in ['세탁된 검색어:', '영어 검색어:', 'Search query:', 'Query:']:
+                if sanitized.lower().startswith(prefix.lower()):
+                    sanitized = sanitized[len(prefix):].strip()
+            
+            # 4. 첫 줄만 추출 (여러 줄 응답 방지)
+            sanitized = sanitized.split('\n')[0].strip()
+            
+            # 5. 최대 길이 제한 (10 단어)
+            words = sanitized.split()
+            if len(words) > 10:
+                sanitized = ' '.join(words[:10])
+            
+            if sanitized:
+                logger.info(f'🧼 검색어 세탁: "{user_query}" → "{sanitized}"')
+                return sanitized
+            else:
+                # Fallback: 간단한 키워드 추출
+                fallback = ' '.join(user_query.split()[:5])
+                logger.warning(f'⚠️ 세탁 결과 비어있음, Fallback 사용: "{fallback}"')
+                return fallback
             
         except Exception as e:
             logger.error(f'❌ 검색어 세탁 실패: {str(e)}')
-            # Fallback: 간단한 키워드 추출
-            return ' '.join(user_query.split()[:5])
+            # Fallback: 간단한 키워드 추출 (5 단어)
+            fallback = ' '.join(user_query.split()[:5])
+            logger.info(f'🔄 Fallback 검색어 사용: "{fallback}"')
+            return fallback
     
     async def decide_and_sanitize(
         self,
@@ -202,18 +233,10 @@ class SearchDecisionMaker:
             # 내부 검색 결과 요약
             internal_summary, avg_similarity = self._summarize_internal_results(internal_documents)
             
-            # ✅ 유사도 기반 추가 판단
-            if avg_similarity > 0 and avg_similarity < 0.6:
-                logger.info(f'🚨 평균 유사도 낙점 ({avg_similarity:.2f} < 0.6) → 강제 검색')
-                return await self.sanitize_query(user_query)
-            
             # 프롬프트 구성 (유사도 정보 포함)
             enhanced_summary = f"""평균 유사도: {avg_similarity:.2f}
 
-{internal_summary}
-
-⚠️ 중요: 유사도가 0.7 미만이면 문서가 있어도 관련성이 낮은 것입니다.
-문서에 질문에 대한 **구체적인 답**이 없다면 웹 검색이 필요합니다."""
+{internal_summary}"""
             
             prompt = self.DECISION_PROMPT.format(
                 user_query=user_query,
@@ -225,10 +248,10 @@ class SearchDecisionMaker:
             response = client.chat.completions.create(
                 model=os.getenv('LLM_MODEL_ID', 'DeepSeek-R1'),
                 messages=[
-                    {'role': 'system', 'content': '보안 검색 어시스턴트입니다.'},
+                    {'role': 'system', 'content': '답변 가능성 판단기입니다.'},
                     {'role': 'user', 'content': prompt}
                 ],
-                temperature=0.1,  # 일관성 있는 판단
+                temperature=0.0,  # ✅ 일관성 확보 (0.1 → 0.0)
                 max_tokens=50,  # 빠른 응답
                 stream=False
             )
@@ -268,8 +291,11 @@ class SearchDecisionMaker:
             logger.info(f'🌐 DuckDuckGo 검색 시작: "{query}"')
             
             async with AsyncDDGS() as ddgs:
+                # ✅ Fix: async for → await + for 패턴
+                search_results = await ddgs.text(query, max_results=max_results)
+                
                 results = []
-                async for result in ddgs.text(query, max_results=max_results):
+                for result in search_results:
                     results.append({
                         'title': result.get('title', ''),
                         'body': result.get('body', ''),

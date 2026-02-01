@@ -42,17 +42,30 @@ class SearchDecisionMaker:
 ## 작업
 사용자 질문과 내부 검색 결과를 분석하여 **웹 검색이 필요한지** 판단하세요.
 
+## ⚠️ 중요: 비판적 평가 원칙
+1. **구체적 정답이 없으면 검색하라**
+   - 단순히 키워드가 겹친다고 답변 가능하다고 판단하지 마세요.
+   - 예: "파이썬 버전"이라는 단어만 있고 **구체적 숫자(3.11, 3.12)**가 없으면 불충분!
+
+2. **내부 지식을 사용하지 마라**
+   - 오직 제공된 [Context] 안에 정보가 있는지**만** 확인하세요.
+   - LLM의 사전 학습 지식으로 추측하지 마세요.
+
+3. **최신 정보는 웹 검색 필수**
+   - "최신", "현재", "2025년", "최근" 등의 시간성 표현이 있으면 즉시 검색.
+
 ## 판단 기준
 1. **내부 문서가 충분함** (웹 검색 불필요)
-   - 질문에 직접적으로 답할 수 있는 정보가 있음
-   - 문서에 구체적인 설명/코드/가이드 포함
-   - 유사도가 높고 관련성이 명확함
+   - 질문에 **직접적으로** 답할 수 있는 구체적 정보가 있음
+   - 문서에 상세한 설명/코드/가이드 포함
+   - 유사도가 **0.7 이상**이고 관련성이 명확함
    → 반환: "NO_SEARCH"
 
 2. **내부 문서가 불충분함** (웹 검색 필요)
    - 문서가 아예 없거나 관련성이 낮음
    - 일반적인 기술 질문/개념 설명이 필요함
    - 최신 정보가 필요함 (버전, 업데이트 등)
+   - **부분적 정보**만 있음 (예: 개념 언급만 있고 구체적 방법 없음)
    → 반환: 세탁된 영어 검색어
 
 ## 🔒 보안 규칙 (절대 준수)
@@ -119,10 +132,51 @@ class SearchDecisionMaker:
         
         return '\n'.join(summaries)
     
+    async def sanitize_query(self, user_query: str) -> str:
+        """
+        검색어 세탁 (보안 정보 제거)
+        
+        Args:
+            user_query: 사용자 질문
+        
+        Returns:
+            세탁된 검색어
+        """
+        try:
+            client = self._get_client()
+            sanitize_prompt = f"""다음 질문에서 프로젝트명, 변수명, 파일명 등의 민감한 내부 정보를 제거하고,
+일반적인 기술 용어로만 구성된 **영어 검색어**(3-5 단어)를 생성하세요.
+
+사용자 질문: {user_query}
+
+세탁된 검색어 (영어, 3-5 단어):"""
+            
+            response = client.chat.completions.create(
+                model=os.getenv('LLM_MODEL_ID', 'DeepSeek-R1'),
+                messages=[
+                    {'role': 'system', 'content': '보안 검색 어시스턴트입니다.'},
+                    {'role': 'user', 'content': sanitize_prompt}
+                ],
+                temperature=0.1,
+                max_tokens=30,
+                stream=False
+            )
+            
+            sanitized = response.choices[0].message.content.strip()
+            sanitized = sanitized.replace('"', '').replace("'", "").strip()
+            logger.info(f'🧼 검색어 세탁: "{user_query}" → "{sanitized}"')
+            return sanitized
+            
+        except Exception as e:
+            logger.error(f'❌ 검색어 세탁 실패: {str(e)}')
+            # Fallback: 간단한 키워드 추출
+            return ' '.join(user_query.split()[:5])
+    
     async def decide_and_sanitize(
         self,
         user_query: str,
-        internal_documents: List[Dict[str, Any]]
+        internal_documents: List[Dict[str, Any]],
+        force_search: bool = False
     ) -> str:
         """
         웹 검색 필요성 판단 및 검색어 세탁
@@ -130,11 +184,17 @@ class SearchDecisionMaker:
         Args:
             user_query: 사용자 질문
             internal_documents: 내부 RAG 검색 결과
+            force_search: True일 경우 판단 스킵하고 무조건 검색어 생성
         
         Returns:
             'NO_SEARCH' 또는 세탁된 검색어
         """
         try:
+            # Force Search: 판단 스킵
+            if force_search:
+                logger.info('🔍 강제 검색 모드: 판단 스킵 → 즉시 검색어 생성')
+                return await self.sanitize_query(user_query)
+            
             # 내부 검색 결과 요약
             internal_summary = self._summarize_internal_results(internal_documents)
             

@@ -444,7 +444,13 @@ class GraphDrillDownRetriever:
             
             # Cross-Encoder Reranking
             if use_reranking and documents:
-                documents = self._rerank_documents(query, documents, k)
+                logger.info(f'🔍 Reranking 시작: {len(documents)}개 문서')
+                reranked = self._rerank_documents(query, documents, k)
+                if reranked:
+                    logger.info(f'✅ Reranking 완료: {len(reranked)}개 문서')
+                    documents = reranked
+                else:
+                    logger.warning('⚠️ Reranking 실패 - 원본 순서 유지')
             
             # 상위 k개 반환
             documents.sort(key=lambda x: x.score, reverse=True)
@@ -507,7 +513,10 @@ class GraphDrillDownRetriever:
             reranker = get_reranker()
             
             if not reranker:
+                logger.warning('⚠️ Reranker 미로드 - Reranking 스킵')
                 return documents
+            
+            logger.debug(f'🔍 Reranker 모델 로드 완료, {len(documents)}개 문서 재정렬 시작')
             
             # Query-Document 쌍 생성
             pairs = [(query, doc.content[:2000]) for doc in documents]

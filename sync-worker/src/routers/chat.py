@@ -68,13 +68,28 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
             
             # 조건부 웹 검색
             web_context = ""
+            
+            # ✅ Pre-check: 내부 검색 품질 평가 (즉시 웹 검색 판단)
+            force_web_search = False
+            context_length = len(context)
+            
+            if context_length == 0:
+                logger.info('🔍 Pre-check: 내부 문서 없음 → 강제 웹 검색')
+                force_web_search = True
+            elif context_length < 300:
+                logger.info(f'🔍 Pre-check: 내부 문서 부족 ({context_length}자 < 300자) → 강제 웹 검색')
+                force_web_search = True
+            
             try:
                 from utils.web_search import get_search_decision_maker
                 
                 decision_maker = get_search_decision_maker()
+                
+                # force_search 플래그 전달
                 decision = await decision_maker.decide_and_sanitize(
                     user_query=user_message,
-                    internal_documents=VectorSearchManager._last_search_results
+                    internal_documents=VectorSearchManager._last_search_results,
+                    force_search=force_web_search
                 )
                 
                 if decision != 'NO_SEARCH':

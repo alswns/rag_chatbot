@@ -61,9 +61,9 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
                 {'role': 'user', 'content': user_message}
             ]
         else:
-            # RAG 검색
+            # RAG 검색 (재작성된 쿼리 사용)
             logger.info('Step 1: RAG 검색...')
-            context = await VectorSearchManager.search(user_message)
+            context = await VectorSearchManager.search(search_query)
             logger.info(f'검색 완료: {len(context)}자')
             
             # 조건부 웹 검색
@@ -89,12 +89,12 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
                 web_service = get_web_search_service()
                 
                 # 대화 히스토리 준비 (최근 3턴)
-                history = [msg for msg in request.messages[:-1] if msg.role in ['user', 'assistant']]
-                history_context = [{'role': msg.role, 'content': msg.content} for msg in history[-6:]]
+                history_for_web = [msg for msg in request.messages[:-1] if msg.role in ['user', 'assistant']]
+                history_context = [{'role': msg.role, 'content': msg.content} for msg in history_for_web[-6:]]
                 
-                # 웹 검색 수행 (force_search 플래그 + history 전달)
+                # 웹 검색 수행 (재작성된 쿼리 사용)
                 web_context = await web_service.search_if_needed(
-                    user_query=user_message,
+                    user_query=search_query,  # 재작성된 쿼리
                     internal_context=context,
                     force_search=force_web_search,
                     history=history_context
@@ -108,11 +108,11 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
             except Exception as e:
                 logger.error(f'❌ 웹 검색 실패: {str(e)}')
             
-            # Intent 분류
+            # Intent 분류 (재작성된 쿼리 사용)
             detected_intent = 'explanation'
             if deps.semantic_router:
                 try:
-                    detected_intent, confidence = deps.semantic_router.classify(user_message)
+                    detected_intent, confidence = deps.semantic_router.classify(search_query)
                     logger.info(f'🎯 Intent: {detected_intent} (confidence={confidence:.2f})')
                 except Exception as e:
                     logger.warning(f'⚠️ Intent 분류 실패: {str(e)}')

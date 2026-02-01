@@ -295,8 +295,9 @@ class DuckDuckGoSearcher:
         try:
             logger.info(f'🌐 DuckDuckGo 검색: "{query}"')
             
-            # ✅ Bug Fix: timeout 파라미터 제거 (datetime.timedelta 에러 방지)
-            async with AsyncDDGS(timeout=20) as ddgs:
+            # ✅ Fix: timeout 파라미터 제거 (timedelta 에러 방지)
+            # duckduckgo-search 5.3.1은 기본 timeout 사용
+            async with AsyncDDGS() as ddgs:
                 search_results = await ddgs.text(query, max_results=max_results)
                 
                 # 결과가 제너레이터나 비동기 제너레이터인 경우 처리

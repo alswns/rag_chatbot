@@ -108,7 +108,7 @@ async def initialize_app():
         deps.drill_down_retriever = GraphDrillDownRetriever(
             vector_store=deps.vector_store,
             graph=graph,
-            hub_types=['page', 'root'],
+            hub_types=['document', 'virtual_root'],  # ✅ 실제 그래프 노드 타입에 맞춤
             hub_score_threshold=0.3
         )
         logger.info('✅ Drill-Down Retriever 준비')

@@ -85,8 +85,14 @@ GRAPH_PERSIST_PATH = os.getenv('GRAPH_PERSIST_PATH', './data/graph.pkl')
 # 2개만 찾아도 페이지 2개 분량이 통째로 들어가므로 충분함
 SEARCH_TOP_K = int(os.getenv('SEARCH_TOP_K', '2'))
 
+# ✅ Reranking 설정
+ENABLE_RERANKING = os.getenv('ENABLE_RERANKING', 'true').lower() == 'true'
+RERANKER_MODEL = os.getenv('RERANKER_MODEL', 'BAAI/bge-reranker-v2-m3')
+RERANKER_TOP_K = int(os.getenv('RERANKER_TOP_K', '10'))
+
 logger.info(f'✅ 모델: {MODEL_NAME}')
 logger.info(f'✅ LLM Backend: {LLM_BACKEND.upper()}')
+logger.info(f'✅ Reranking: {"활성화" if ENABLE_RERANKING else "비활성화"} (모델: {RERANKER_MODEL if ENABLE_RERANKING else "N/A"})')
 
 # ==================== 글로벌 변수 ====================
 
@@ -168,16 +174,22 @@ class VectorSearchManager:
             # Step 2: Drill-Down 검색 (3단계 드릴다운)
             # =====================================================
             if drill_down_retriever is not None:
-                logger.info(f'🔍 드릴다운 검색 시작: "{query[:50]}..." (top_k={top_k})')
+                logger.info(f'🔍 드릴다운 검색 시작: "{query[:50]}..." (top_k={top_k}, rerank={ENABLE_RERANKING})')
                 
-                documents, context_xml = drill_down_retriever.retrieve_with_context(
+                # ✅ Reranking 활성화: 더 많은 후보를 검색한 뒤 정렬
+                search_k = RERANKER_TOP_K if ENABLE_RERANKING else top_k
+                
+                documents = drill_down_retriever.retrieve(
                     query=query,
-                    k=top_k,
-                    context_format='xml'
+                    k=search_k,
+                    use_reranking=ENABLE_RERANKING
                 )
                 
                 if documents:
-                    logger.info(f'✅ 드릴다운 검색 완료: {len(documents)}개 문서')
+                    # Reranking 후 상위 top_k개만 사용
+                    documents = documents[:top_k]
+                    context_xml = drill_down_retriever._format_as_xml(documents)
+                    logger.info(f'✅ 드릴다운 검색 완료: {len(documents)}개 문서 (Rerank: {ENABLE_RERANKING})')
                     return context_xml
                 else:
                     logger.info('⚠️ 드릴다운 검색 결과 없음 → Fallback')
@@ -185,10 +197,15 @@ class VectorSearchManager:
             # =====================================================
             # Step 3: Fallback - 기존 검색 방식
             # =====================================================
-            logger.info(f'🔍 Fallback 검색: "{query[:50]}..." (top_k={top_k})')
+            logger.info(f'🔍 Fallback 검색: "{query[:50]}..." (top_k={top_k}, rerank={ENABLE_RERANKING})')
             
-            # 기존 retrieve_context 사용
-            context = vector_store.retrieve_context(query, top_k=top_k, use_hybrid=True)
+            # 기존 retrieve_context 사용 + Reranking
+            context = vector_store.retrieve_context(
+                query, 
+                top_k=top_k, 
+                use_hybrid=True,
+                use_reranking=ENABLE_RERANKING
+            )
             
             if not context:
                 logger.info('⚠️ 검색 결과 없음')
@@ -236,7 +253,11 @@ class VectorSearchManager:
             
             # Drill-Down 검색
             if drill_down_retriever is not None:
-                documents = drill_down_retriever.retrieve(query, k=top_k)
+                documents = drill_down_retriever.retrieve(
+                    query, 
+                    k=top_k,
+                    use_reranking=ENABLE_RERANKING
+                )
                 if documents:
                     result['documents'] = [doc.to_dict() for doc in documents]
                     result['context'] = drill_down_retriever._format_as_xml(documents)
@@ -244,7 +265,12 @@ class VectorSearchManager:
                     return result
             
             # Fallback
-            context = vector_store.retrieve_context(query, top_k=top_k, use_hybrid=True)
+            context = vector_store.retrieve_context(
+                query, 
+                top_k=top_k, 
+                use_hybrid=True,
+                use_reranking=ENABLE_RERANKING
+            )
             result['context'] = context
             result['search_type'] = 'fallback'
             
@@ -553,6 +579,26 @@ def preload_embedding_service():
         logger.warning(f'⚠️ 임베딩 서비스 사전 로드 실패: {str(e)}')
 
 
+def preload_reranker():
+    """
+    Reranker 사전 로드 (GPU 활용)
+    """
+    if not ENABLE_RERANKING:
+        logger.info('ℹ️  Reranking 비활성화 - Reranker 로드 스킵')
+        return
+    
+    try:
+        from db.vector_store import get_reranker
+        logger.info(f'🔄 Reranker 사전 로드 중... (모델: {RERANKER_MODEL})')
+        reranker = get_reranker()
+        if reranker:
+            logger.info(f'✅ Reranker 로드 완료: {RERANKER_MODEL}')
+        else:
+            logger.warning('⚠️ Reranker 로드 실패')
+    except Exception as e:
+        logger.warning(f'⚠️ Reranker 사전 로드 실패: {str(e)}')
+
+
 @app.on_event('startup')
 async def startup():
     """서버 시작"""
@@ -563,9 +609,13 @@ async def startup():
     logger.info('=' * 70)
     
     try:
-        # 0️⃣ 임베딩 서비스 사전 로드 (HuggingFace 모델)
+        # 0️⃣ 임베딩 서비스 + Reranker 사전 로드
         logger.info('0️⃣  임베딩 서비스 사전 로드...')
         preload_embedding_service()
+        
+        if ENABLE_RERANKING:
+            logger.info('0️⃣  Reranker 사전 로드...')
+            preload_reranker()
         
         # 1️⃣ 벡터 DB 초기화
         logger.info('1️⃣  벡터 DB 초기화...')
@@ -629,6 +679,7 @@ async def startup():
         logger.info(f'   - Graph: {"✅" if graph else "❌"}')
         logger.info(f'   - Intent Router: {"✅" if intent_router else "❌"}')
         logger.info(f'   - Drill-Down Retriever: {"✅" if drill_down_retriever else "❌"}')
+        logger.info(f'   - Reranking: {"✅" if ENABLE_RERANKING else "❌"} ({RERANKER_MODEL if ENABLE_RERANKING else "N/A"})')
         logger.info(f'   - vLLM: {"✅" if vllm_ready else "❌ (백그라운드 연결 시도)"}')
         logger.info('=' * 70)
         

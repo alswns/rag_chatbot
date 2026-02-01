@@ -22,7 +22,7 @@ services:
 
     environment:
       - VLLM_GPU_MEMORY_UTILIZATION=0.9
-      - LLM_MODEL_ID=${LLM_MODEL_ID:-werty1248/Mistral-Nemo-NT-Ko-12B-sft}
+      - LLM_MODEL_ID=${LLM_MODEL_ID:-Qwen/Qwen2.5-14B-Instruct-AWQ}
       - VLLM_LOG_LEVEL=INFO
       - VLLM_USE_V1=0
       - NVIDIA_VISIBLE_DEVICES=all
@@ -36,21 +36,22 @@ services:
       - "8000:8000"
 
     command:
-      - "werty1248/Mistral-Nemo-NT-Ko-12B-sft"
+      - "Qwen/Qwen2.5-14B-Instruct-AWQ"
       - "--host"
       - "0.0.0.0"
       - "--port"
       - "8000"
+      - "--served-model-name"
+      - "DeepSeek-R1-Distill-8B"
       - "--max-model-len"
-      - "8192"
+      - "8192" # RAG 문맥을 위해 충분한 길이 확보
       - "--gpu-memory-utilization"
-      - "0.8" # ✅ 12B 모델이므로 0.8만 줘도 충분합니다. 남은 20%는 Reranker용!
-      # 만약 양자화 버전을 쓰신다면 해당 옵션 유지, 순정은 삭제
-      - "--quantization" # 🌟 양자화 옵션 필수!
-      - "bitsandbytes"
+      - "0.85" # 14B AWQ는 약 10~12GB VRAM을 사용하므로 0.85면 Reranker용 공간도 충분합니다.
+      - "--quantization"
+      - "awq"
       - "--dtype"
       - "half"
-
+      - "--enforce-eager" # L4 GPU에서 메모리 관리 최적화
     networks:
       - rag-network
 
@@ -89,6 +90,15 @@ services:
       context: ./sync-worker
       dockerfile: Dockerfile
 
+    # ✅ GPU 리소스 할당 (Reranker 가속)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
     environment:
       # LLM
       - LLM_BACKEND=vllm
@@ -107,6 +117,11 @@ services:
       - SERVER_PORT=8010
       - LOG_LEVEL=INFO
       - SEARCH_TOP_K=5
+
+      # ✅ Reranking 활성화 (정확도 향상)
+      - ENABLE_RERANKING=true
+      - RERANKER_MODEL=BAAI/bge-reranker-v2-m3
+      - RERANKER_TOP_K=10
 
     volumes:
       - ./sync-worker/src:/app/src

@@ -22,7 +22,7 @@ services:
 
     environment:
       - VLLM_GPU_MEMORY_UTILIZATION=0.9
-      - LLM_MODEL_ID=${LLM_MODEL_ID:-N-S-G/Mistral-Nemo-12B-Instruct-v1-Korean}
+      - LLM_MODEL_ID=${LLM_MODEL_ID:-werty1248/Mistral-Nemo-NT-Ko-12B-sft}
       - VLLM_LOG_LEVEL=INFO
       - VLLM_USE_V1=0
       - NVIDIA_VISIBLE_DEVICES=all
@@ -36,7 +36,7 @@ services:
       - "8000:8000"
 
     command:
-      - "N-S-G/Mistral-Nemo-12B-Instruct-v1-Korean"
+      - "werty1248/Mistral-Nemo-NT-Ko-12B-sft"
       - "--host"
       - "0.0.0.0"
       - "--port"
@@ -45,8 +45,9 @@ services:
       - "8192"
       - "--gpu-memory-utilization"
       - "0.8" # ✅ 12B 모델이므로 0.8만 줘도 충분합니다. 남은 20%는 Reranker용!
-      - "--trust-remote-code"
       # 만약 양자화 버전을 쓰신다면 해당 옵션 유지, 순정은 삭제
+      - "--quantization" # 🌟 양자화 옵션 필수!
+      - "bitsandbytes"
       - "--dtype"
       - "half"
 

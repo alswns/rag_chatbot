@@ -46,7 +46,9 @@ services:
       - "--max-model-len"
       - "16384" # RAG 문맥을 위해 충분한 길이 확보
       - "--gpu-memory-utilization"
-      - "0.7" # 14B AWQ는 약 10~12GB VRAM을 사용하므로 0.85면 Reranker용 공간도 충분합니다.
+      - "0.8"
+      - "--max-num-seqs"
+      - "3"
       - "--quantization"
       - "awq"
       - "--dtype"

@@ -353,12 +353,21 @@ class VectorStoreManager:
             정밀하게 재정렬된 검색 결과
         """
         try:
+            # ✅ RERANKER_TOP_K 환경변수 가져오기 (기본값 50)
+            reranker_top_k = int(os.getenv('RERANKER_TOP_K', '50'))
+            
             logger.info(f'🔍 검색 시작: "{query[:50]}..." (top_k={top_k}, graph={use_graph}, rerank={use_reranking})')
             
             # ========================================
             # [Step 1] 1차 검색: 벡터 검색
             # ========================================
-            search_k = min(top_k * 4, 30)  # 후보 풀
+            # ✅ Reranking 사용시 RERANKER_TOP_K만큼, 아니면 기존 로직
+            if use_reranking:
+                search_k = reranker_top_k
+            else:
+                search_k = min(top_k * 4, 30)  # 후보 풀
+            
+            logger.debug(f'[Step 1] 검색 후보 개수: {search_k} (reranking={use_reranking})')
             
             # 쿼리 임베딩 생성
             query_embedding_array = self.embedding_service.encode([query])
@@ -529,7 +538,10 @@ class VectorStoreManager:
             )[:top_k]
             
             # 로그
-            logger.info(f'✅ 검색 완료: {len(final_results)}개 반환')
+            if use_reranking:
+                logger.info(f'✅ 검색 완료: {len(final_results)}개 반환 (후보 {search_k}개에서 Reranking 적용)')
+            else:
+                logger.info(f'✅ 검색 완료: {len(final_results)}개 반환 (후보 {search_k}개)')
             for i, r in enumerate(final_results[:3]):
                 title = r['metadata'].get('title', 'Untitled')[:30]
                 logger.debug(f'   #{i+1}: {title}... (score={r["final_score"]:.3f}, src={r["source"]})')

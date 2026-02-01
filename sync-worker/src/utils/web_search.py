@@ -17,9 +17,10 @@ logger = logging.getLogger(__name__)
 
 # DuckDuckGo 라이브러리 임포트
 try:
-    from duckduckgo_search import AsyncDDGS
+    from duckduckgo_search import DDGS  # ✅ AsyncDDGS 대신 동기 버전 사용
+    import asyncio
 except ImportError:
-    AsyncDDGS = None
+    DDGS = None
     logger.warning('⚠️ duckduckgo-search 미설치 - 웹 검색 비활성화')
 
 
@@ -277,9 +278,9 @@ class QueryGenerator:
 class DuckDuckGoSearcher:
     """DuckDuckGo 웹 검색 실행"""
     
-    async def search(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+    def _search_sync(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
         """
-        DuckDuckGo 검색 수행
+        동기 DuckDuckGo 검색 수행 (내부 메서드)
         
         Args:
             query: 검색어
@@ -288,45 +289,53 @@ class DuckDuckGoSearcher:
         Returns:
             [{'title': ..., 'body': ..., 'href': ...}, ...]
         """
-        if AsyncDDGS is None:
+        if DDGS is None:
             logger.error('❌ duckduckgo-search 미설치')
             return []
         
         try:
-            logger.info(f'🌐 DuckDuckGo 검색: "{query}"')
-            
-            # ✅ Fix: timeout 파라미터 제거 (timedelta 에러 방지)
-            # duckduckgo-search 5.3.1은 기본 timeout 사용
-            async with AsyncDDGS() as ddgs:
-                search_results = await ddgs.text(query, max_results=max_results)
+            # ✅ Fix: 동기 DDGS 사용 (timedelta 에러 완전 회피)
+            with DDGS() as ddgs:
+                search_results = ddgs.text(query, max_results=max_results)
                 
-                # 결과가 제너레이터나 비동기 제너레이터인 경우 처리
                 results = []
+                # DDGS.text()는 제너레이터를 반환
+                for result in search_results:
+                    results.append({
+                        'title': result.get('title', ''),
+                        'body': result.get('body', ''),
+                        'href': result.get('href', '')
+                    })
                 
-                # AsyncDDGS.text()는 리스트를 직접 반환
-                if isinstance(search_results, list):
-                    for result in search_results:
-                        results.append({
-                            'title': result.get('title', ''),
-                            'body': result.get('body', ''),
-                            'href': result.get('href', '')
-                        })
-                else:
-                    # 제너레이터인 경우 (혹시 몰라서)
-                    async for result in search_results:
-                        results.append({
-                            'title': result.get('title', ''),
-                            'body': result.get('body', ''),
-                            'href': result.get('href', '')
-                        })
-                
-                logger.info(f'✅ 검색 완료: {len(results)}개 결과')
                 return results
                 
         except Exception as e:
             logger.error(f'❌ DuckDuckGo 검색 실패: {str(e)}')
             logger.debug(f'검색 쿼리: "{query}", max_results: {max_results}', exc_info=True)
             return []
+    
+    async def search(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+        """
+        비동기 DuckDuckGo 검색 수행
+        
+        Args:
+            query: 검색어
+            max_results: 최대 결과 수
+        
+        Returns:
+            [{'title': ..., 'body': ..., 'href': ...}, ...]
+        """
+        logger.info(f'🌐 DuckDuckGo 검색: "{query}"')
+        
+        # ✅ 동기 함수를 asyncio.to_thread로 비동기 실행
+        results = await asyncio.to_thread(self._search_sync, query, max_results)
+        
+        if results:
+            logger.info(f'✅ 검색 완료: {len(results)}개 결과')
+        else:
+            logger.warning('⚠️ 검색 결과 없음')
+        
+        return results
     
     def format_results(self, results: List[Dict[str, Any]]) -> str:
         """검색 결과를 LLM용 컨텍스트로 포맷팅"""

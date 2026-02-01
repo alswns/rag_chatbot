@@ -21,8 +21,6 @@ NC='\033[0m'
 # =============================================================================
 # 설정 (환경에 맞게 수정하세요)
 # =============================================================================
-# ./scripts/upload-to-server.sh --host ec2-43-201-32-45.ap-northeast-2.compute.amazonaws.com --key ~/Desktop/rag.pem
-
 REMOTE_USER="${REMOTE_USER:-ubuntu}"
 REMOTE_HOST="${REMOTE_HOST:-your-server.com}"
 REMOTE_PORT="${REMOTE_PORT:-22}"
@@ -87,10 +85,10 @@ if [ ! -f "${SSH_KEY/#\~/$HOME}" ]; then
 fi
 
 # 1. 로컬 데이터 확인
-echo -e "\n${YELLOW}[1/5] 로컬 데이터 확인 중...${NC}"
+echo -e "\n${YELLOW}[1/4] 로컬 데이터 확인 중...${NC}"
 
 DATA_SIZE=$(du -sh data 2>/dev/null | cut -f1 || echo "N/A")
-echo -e "  • 전체 데이터 크기: ${DATA_SIZE}"
+echo -e "  • 데이터 크기: ${DATA_SIZE}"
 
 if [ -f "data/graph.pkl" ]; then
     GRAPH_SIZE=$(du -h data/graph.pkl | cut -f1)
@@ -99,13 +97,11 @@ else
     echo -e "  ${RED}✗ graph.pkl 없음${NC}"
 fi
 
-# ChromaDB 경로: data/chroma (docker-compose 표준 경로)
 if [ -d "data/chroma" ] && [ "$(ls -A data/chroma 2>/dev/null)" ]; then
     CHROMA_SIZE=$(du -sh data/chroma | cut -f1)
-    echo -e "  ${GREEN}✓ ChromaDB: ${CHROMA_SIZE}${NC}"
+    echo -e "  ${GREEN}✓ chroma/: ${CHROMA_SIZE}${NC}"
 else
-    echo -e "  ${YELLOW}⚠ data/chroma 비어있음 (동기화 먼저 실행 필요)${NC}"
-    echo -e "    → ./scripts/sync-data.sh -d 실행 후 다시 시도하세요"
+    echo -e "  ${RED}✗ chroma/ 비어있음${NC}"
 fi
 
 # 2. SSH 연결 테스트
@@ -119,29 +115,51 @@ else
     exit 1
 fi
 
-# 3. 원격 디렉토리 및 깃 클론
-echo -e "\n${YELLOW}[3/5] 원격 디렉토리 및 깃 클론 준비 중...${NC}"
-$SSH_CMD ${REMOTE_USER}@${REMOTE_HOST} "\
-  if [ ! -d ${REMOTE_PATH}/.git ]; then \
-    git clone https://github.com/alswns/rag_chatbot.git ${REMOTE_PATH}; \
-  fi; \
-  mkdir -p ${REMOTE_PATH}/data/chroma"
-echo -e "${GREEN}✓ 원격 디렉토리 및 깃 클론 완료${NC}"
+# 3. 원격 디렉토리 준비
+echo -e "\n${YELLOW}[3/4] 원격 디렉토리 준비 중...${NC}"
+$SSH_CMD ${REMOTE_USER}@${REMOTE_HOST} "mkdir -p ${REMOTE_PATH}/data/chroma"
+echo -e "${GREEN}✓ 원격 디렉토리 생성 완료${NC}"
 
-# 전체 data 폴더 통째로 전송 (그래프, chroma, sync_progress 포함)
-echo -e "${BLUE}  data/ 전체 전송 중...${NC}"
-if [ -d "data" ] && [ "$(ls -A data 2>/dev/null)" ]; then
-    rsync $RSYNC_OPTS --delete \
-        -e "ssh -i ${SSH_KEY/#\~/$HOME} -p ${REMOTE_PORT}" \
-        data/ \
-        ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/data/
-else
-    echo -e "${YELLOW}  data/ 폴더 비어있음 (스킵)${NC}"
+# 4. 데이터 전송
+echo -e "\n${YELLOW}[4/5] 데이터 전송 중...${NC}"
+
+RSYNC_OPTS="-avz --progress"
+if [ "$VERBOSE" = true ]; then
+    RSYNC_OPTS="$RSYNC_OPTS -v"
+fi
+if [ "$DRY_RUN" = true ]; then
+    RSYNC_OPTS="$RSYNC_OPTS --dry-run"
+    echo -e "${YELLOW}  (Dry-run 모드 - 실제 전송 없음)${NC}"
 fi
 
-# 5. .env 파일 전송 (클론한 경로로)
+echo -e "${BLUE}  graph.pkl 전송 중...${NC}"
+if [ -f "data/graph.pkl" ]; then
+    rsync $RSYNC_OPTS \
+        -e "ssh -i ${SSH_KEY/#\~/$HOME} -p ${REMOTE_PORT}" \
+        data/graph.pkl \
+        ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/data/
+fi
+
+echo -e "${BLUE}  sync_progress.json 전송 중...${NC}"
+if [ -f "data/sync_progress.json" ]; then
+    rsync $RSYNC_OPTS \
+        -e "ssh -i ${SSH_KEY/#\~/$HOME} -p ${REMOTE_PORT}" \
+        data/sync_progress.json \
+        ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/data/
+fi
+
+echo -e "${BLUE}  chroma/ 전송 중...${NC}"
+if [ -d "data/chroma" ]; then
+    rsync $RSYNC_OPTS --delete \
+        -e "ssh -i ${SSH_KEY/#\~/$HOME} -p ${REMOTE_PORT}" \
+        data/chroma/ \
+        ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/data/chroma/
+fi
+
+# 5. .env 파일 전송 (별도)
 echo -e "\n${YELLOW}[5/5] .env 파일 전송 중...${NC}"
 if [ -f ".env" ]; then
+    # scp로 .env 파일 별도 전송 (rsync 대신)
     if [ "$DRY_RUN" = true ]; then
         echo -e "${YELLOW}  (Dry-run) scp .env → ${REMOTE_PATH}/.env${NC}"
     else

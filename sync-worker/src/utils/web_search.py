@@ -294,20 +294,24 @@ class DuckDuckGoSearcher:
             return []
         
         try:
-            # ✅ Fix: 동기 DDGS 사용 (timedelta 에러 완전 회피)
-            with DDGS() as ddgs:
-                search_results = ddgs.text(query, max_results=max_results)
-                
-                results = []
-                # DDGS.text()는 제너레이터를 반환
-                for result in search_results:
-                    results.append({
-                        'title': result.get('title', ''),
-                        'body': result.get('body', ''),
-                        'href': result.get('href', '')
-                    })
-                
-                return results
+            # ✅ Fix: context manager 제거, 직접 호출
+            ddgs = DDGS()
+            search_results = ddgs.text(query, max_results=max_results)
+            
+            results = []
+            # DDGS.text()는 제너레이터를 반환
+            count = 0
+            for result in search_results:
+                results.append({
+                    'title': result.get('title', ''),
+                    'body': result.get('body', ''),
+                    'href': result.get('href', '')
+                })
+                count += 1
+                if count >= max_results:
+                    break
+            
+            return results
                 
         except Exception as e:
             logger.error(f'❌ DuckDuckGo 검색 실패: {str(e)}')

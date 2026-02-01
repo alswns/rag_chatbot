@@ -750,6 +750,25 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
         # ✅ Open WebUI 내부 Task 요청 감지 (RAG 검색 불필요)
         is_internal_task = user_message.strip().startswith('### Task:')
         
+        # ✅ follow-up questions 요청은 완전히 차단
+        if 'follow-up questions' in user_message.lower() or 'Suggest 3-5 relevant' in user_message:
+            logger.info('🚫 Follow-up questions 요청 차단 → 빈 응답 반환')
+            return {
+                'id': f'chatcmpl-{datetime.now().timestamp()}',
+                'object': 'chat.completion',
+                'created': int(datetime.now().timestamp()),
+                'model': MODEL_NAME,
+                'choices': [{
+                    'index': 0,
+                    'message': {
+                        'role': 'assistant',
+                        'content': ''
+                    },
+                    'finish_reason': 'stop'
+                }],
+                'usage': {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0}
+            }
+        
         if is_internal_task:
             # 내부 Task는 RAG 검색 없이 바로 LLM에 전달
             logger.info('🔧 Open WebUI 내부 Task 감지 → RAG 스킵')

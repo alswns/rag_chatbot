@@ -318,40 +318,18 @@ class ModelManager:
 class QuestionAnsweringManager:
     """DeepSeek-R1 기반 답변 생성"""
     
-    SYSTEM_PROMPT = """# 시스템 설정: 한국어 전용 RAG 어시스턴트
+    SYSTEM_PROMPT = """당신은 한국어로 답변하는 RAG 어시스턴트입니다.
 
-## 🚨 최우선 규칙: 언어 제한 (CRITICAL)
-1. **출력 언어**: 모든 응답은 반드시 **한국어**로만 작성합니다.
-2. **중국어 절대 금지**: 简体中文, 繁體中文, 일본어(日本語) 등 **비한국어 문자는 단 한 글자도 사용하지 마세요.**
-3. **사고 과정도 한국어**: <think> 태그 내부도 반드시 한국어로 사고합니다.
-4. **영어 허용 범위**: 기술 고유명사(Docker, API, Python 등)와 코드만 영어 허용.
+## 핵심 규칙
+1. **한국어 전용**: 모든 응답은 반드시 한국어로 작성합니다. 중국어, 일본어는 절대 사용하지 마세요.
+2. **문서 기반 답변**: <context> 안의 문서 내용을 기반으로 답변합니다.
+3. **정보 없음 처리**: 문서에 관련 정보가 없으면 "제공된 문서에는 해당 정보가 없습니다."라고 답합니다.
+4. **자연스러운 대화**: 딱딱한 형식 없이 자연스럽게 설명합니다.
 
-## 📋 역할 정의
-당신은 **한국어 RAG 전문 어시스턴트**입니다. 사용자가 제공한 문서(<context>)를 기반으로 정확하고 간결한 답변을 제공합니다.
-
-## 📄 문서 처리 규칙
-1. **문서 우선**: <context> 태그 안의 내용이 **유일한 정보 소스**입니다.
-2. **정보 통합**: 여러 문서 조각이 있으면 맥락을 연결해 하나의 완결된 답변을 구성하세요.
-3. **정보 없음 처리**: 문서에 관련 정보가 없으면 솔직하게 "제공된 문서에는 해당 정보가 없습니다."라고 답하세요.
-4. **추측 금지**: 문서에 없는 내용을 지어내지 마세요.
-
-## ✍️ 답변 형식
-1. **핵심 먼저**: 질문에 대한 핵심 답변을 첫 문장에 제시합니다.
-2. **구조화**: 세부 내용은 불렛 포인트(-)로 정리합니다.
-3. **간결함**: 불필요한 미사여구 없이 드라이한 전문가 톤을 유지합니다.
-4. **출처 표기**: 가능한 경우 "(문서 N)" 형식으로 출처를 표기합니다.
-
-## 🔧 응답 예시
-질문: "Docker란 무엇인가요?"
-답변:
-Docker는 애플리케이션을 컨테이너로 패키징하고 실행하는 플랫폼입니다. (문서 1)
-
-- **컨테이너**: 앱과 의존성을 격리된 환경에서 실행
-- **이미지**: 컨테이너의 템플릿 역할
-- **장점**: 환경 일관성, 빠른 배포, 리소스 효율성
-
----
-위 규칙을 엄격히 준수하며, 이제 사용자 질문에 답변하세요."""
+## 답변 스타일
+- 핵심 내용을 먼저 말하고 세부 사항을 설명
+- 불필요한 인사말이나 미사여구 생략
+- 기술 용어는 영어 그대로 사용 가능 (예: Docker, API)"""
     
     @staticmethod
     def extract_user_message(messages: List[ChatMessage]) -> Optional[str]:
@@ -769,14 +747,28 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
         
         logger.info(f'질문: {user_message[:100]}...')
         
-        # 2️⃣  벡터 DB 검색 (RAG)
-        logger.info('Step 1: RAG 검색...')
-        context = VectorSearchManager.search(user_message, top_k=SEARCH_TOP_K)
-        logger.info(f'검색 완료: {len(context)}자')
+        # ✅ Open WebUI 내부 Task 요청 감지 (RAG 검색 불필요)
+        is_internal_task = user_message.strip().startswith('### Task:')
         
-        # 3️⃣  프롬프트 구성
-        logger.info('Step 2: 프롬프트 구성...')
-        final_user_content = f"""다음은 검색된 참고 문서입니다:
+        if is_internal_task:
+            # 내부 Task는 RAG 검색 없이 바로 LLM에 전달
+            logger.info('🔧 Open WebUI 내부 Task 감지 → RAG 스킵')
+            context = ""
+            final_user_content = user_message
+            
+            # 내부 Task용 간단한 시스템 프롬프트
+            vllm_messages = [
+                {'role': 'system', 'content': 'You are a helpful assistant. Respond in the requested format.'}
+            ]
+        else:
+            # 2️⃣  벡터 DB 검색 (RAG)
+            logger.info('Step 1: RAG 검색...')
+            context = VectorSearchManager.search(user_message, top_k=SEARCH_TOP_K)
+            logger.info(f'검색 완료: {len(context)}자')
+            
+            # 3️⃣  프롬프트 구성
+            logger.info('Step 2: 프롬프트 구성...')
+            final_user_content = f"""다음은 검색된 참고 문서입니다:
 {context}
 
 ---
@@ -786,10 +778,10 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
 
 위 문서를 참고하여 질문에 답하세요."""
         
-        # 메시지 재구성
-        vllm_messages = [
-            {'role': 'system', 'content': QuestionAnsweringManager.SYSTEM_PROMPT}
-        ]
+            # 메시지 재구성 (일반 RAG 질문)
+            vllm_messages = [
+                {'role': 'system', 'content': QuestionAnsweringManager.SYSTEM_PROMPT}
+            ]
         
         # ✅ [수정] 토큰 제한을 고려하여 최근 메시지만 포함
         # 너무 오래된 대화는 제외하여 토큰 절약
@@ -797,16 +789,20 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
         max_history = 3  # 최근 3개 메시지까지만 포함
         
         # 현재 메시지 이전의 모든 메시지 중 최근 max_history개만 선택
-        history_messages = request.messages[:-1]  # 현재 메시지 제외
-        if len(history_messages) > max_history:
-            history_messages = history_messages[-max_history:]  # 최근 max_history개만
-        
-        # 선택된 과거 메시지 추가
-        for msg in history_messages:
-            if msg.role in ['user', 'assistant']:
-                vllm_messages.append({'role': msg.role, 'content': msg.content})
-        
-        logger.info(f'메시지: System + History({len(history_messages)}) + Current = {len(vllm_messages)+1}개')
+        # (내부 Task는 히스토리 포함하지 않음)
+        if not is_internal_task:
+            history_messages = request.messages[:-1]  # 현재 메시지 제외
+            if len(history_messages) > max_history:
+                history_messages = history_messages[-max_history:]  # 최근 max_history개만
+            
+            # 선택된 과거 메시지 추가
+            for msg in history_messages:
+                if msg.role in ['user', 'assistant']:
+                    vllm_messages.append({'role': msg.role, 'content': msg.content})
+            
+            logger.info(f'메시지: System + History({len(history_messages)}) + Current = {len(vllm_messages)+1}개')
+        else:
+            logger.info(f'메시지: Internal Task (히스토리 없음)')
         
         # 최종 사용자 메시지 추가 (검색된 컨텍스트 포함)
         vllm_messages.append({'role': 'user', 'content': final_user_content})

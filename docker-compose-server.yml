@@ -44,7 +44,7 @@ services:
       - "--served-model-name"
       - "DeepSeek-R1-Distill-8B"
       - "--max-model-len"
-      - "8192" # RAG 문맥을 위해 충분한 길이 확보
+      - "16384" # RAG 문맥을 위해 충분한 길이 확보
       - "--gpu-memory-utilization"
       - "0.7" # 14B AWQ는 약 10~12GB VRAM을 사용하므로 0.85면 Reranker용 공간도 충분합니다.
       - "--quantization"
@@ -121,7 +121,7 @@ services:
       # ✅ Reranking 활성화 (정확도 향상)
       - ENABLE_RERANKING=true
       - RERANKER_MODEL=BAAI/bge-reranker-v2-m3
-      - RERANKER_TOP_K=10
+      - RERANKER_TOP_K=50
 
     volumes:
       - ./sync-worker/src:/app/src

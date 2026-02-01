@@ -35,6 +35,9 @@ GitPython==3.1.40
 rank-bm25>=0.2.2
 gitignore-parser>=0.1.9
 
+# Web Search (조건부 웹 검색)
+duckduckgo-search>=5.0.0
+
 # Optional: Tree-sitter for advanced AST parsing
 # tree-sitter>=0.21.0
 # tree-sitter-python>=0.21.0

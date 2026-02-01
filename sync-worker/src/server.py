@@ -422,7 +422,11 @@ class VectorSearchManager:
     
     - Non-blocking I/O: ThreadPoolExecutor 사용
     - Observability: time_logger 데코레이터 적용
+    - 웹 검색 판단용 결과 저장
     """
+    
+    # ✅ 마지막 검색 결과 저장 (웹 검색 판단용)
+    _last_search_results: List[Dict[str, Any]] = []
     
     @staticmethod
     @time_logger
@@ -467,11 +471,22 @@ class VectorSearchManager:
                 if documents:
                     documents = documents[:top_k]
                     logger.info(f'🔍 결과 자르기: {len(documents)}개 → {top_k}개')
+                    
+                    # ✅ 웹 검색 판단용 결과 저장
+                    VectorSearchManager._last_search_results = [
+                        {
+                            'content': doc.content,
+                            'metadata': doc.metadata,
+                            'score': doc.score
+                        } for doc in documents
+                    ]
+                    
                     context_xml = drill_down_retriever._format_as_xml(documents)
                     logger.info(f'✅ 드릴다운 검색 완료: {len(documents)}개 문서')
                     return context_xml
                 else:
                     logger.info('⚠️ 드릴다운 검색 결과 없음 → Fallback')
+                    VectorSearchManager._last_search_results = []
             
             # =====================================================
             # Step 3: Fallback - 기존 검색 방식
@@ -1140,6 +1155,38 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
             context = await VectorSearchManager.search(user_message, top_k=SEARCH_TOP_K)
             logger.info(f'검색 완료: {len(context)}자')
             
+            # ✅ 조건부 웹 검색 (Conditional Web Search)
+            web_context = ""
+            internal_docs_for_decision = []  # 웹 검색 판단용
+            
+            # 내부 검색 결과 파싱 (간단한 휴리스틱)
+            if drill_down_retriever and hasattr(VectorSearchManager, '_last_search_results'):
+                internal_docs_for_decision = getattr(VectorSearchManager, '_last_search_results', [])
+            
+            # Step 1.5: 웹 검색 필요성 판단 (보안 우선)
+            try:
+                from utils.web_search import get_search_decision_maker
+                
+                decision_maker = get_search_decision_maker()
+                decision = await decision_maker.decide_and_sanitize(
+                    user_query=user_message,
+                    internal_documents=internal_docs_for_decision
+                )
+                
+                if decision != 'NO_SEARCH':
+                    # 웹 검색 실행
+                    logger.info(f'🌐 웹 검색 실행: "{decision}"')
+                    web_results = await decision_maker.search(decision, max_results=5)
+                    web_context = decision_maker.format_web_results(web_results)
+                    logger.info(f'✅ 웹 검색 완료: {len(web_results)}개 결과')
+                else:
+                    logger.info('ℹ️  웹 검색 스킵: 내부 문서로 충분')
+                    
+            except ImportError:
+                logger.warning('⚠️  web_search 모듈 없음 - 웹 검색 스킵')
+            except Exception as e:
+                logger.error(f'❌ 웹 검색 실패: {str(e)} - 내부 검색 결과만 사용')
+            
             # ✅ Semantic Intent 분류 (No LLM)
             detected_intent = 'explanation'  # default
             if semantic_router:
@@ -1158,10 +1205,16 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
             # ✅ Dynamic Persona: Intent에 따른 시스템 프롬프트 선택
             dynamic_prompt = QuestionAnsweringManager.get_dynamic_prompt(detected_intent)
             
+            # ✅ 통합 컨텍스트 구성 (내부 + 웹)
+            combined_context = context
+            if web_context:
+                combined_context = f"{context}\n\n{web_context}"
+                logger.info(f'📚 통합 컨텍스트: 내부 {len(context)}자 + 웹 {len(web_context)}자')
+            
             # ✅ TokenManager를 사용한 동적 컨텍스트 윈도우 관리
             vllm_messages = TokenManager.manage_context_window(
                 system_prompt=dynamic_prompt,  # ✅ Intent-aware prompt
-                context=context,
+                context=combined_context,  # ✅ 내부 + 웹 검색 결과
                 current_query=user_message,
                 history=history,
                 max_tokens=MAX_CONTEXT_TOKENS

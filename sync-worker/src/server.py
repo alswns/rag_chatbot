@@ -124,12 +124,12 @@ OLLAMA_API_URL = os.getenv('OLLAMA_API_URL', 'http://localhost:11434')
 CHROMA_HOST = os.getenv('CHROMA_HOST', 'localhost')
 CHROMA_PORT = int(os.getenv('CHROMA_PORT', '8000'))
 GRAPH_PERSIST_PATH = os.getenv('GRAPH_PERSIST_PATH', './data/graph.pkl')
-SEARCH_TOP_K = int(os.getenv('SEARCH_TOP_K', '50'))
+SEARCH_TOP_K = int(os.getenv('SEARCH_TOP_K', '5'))
 
 # ✅ Reranking 설정
 ENABLE_RERANKING = os.getenv('ENABLE_RERANKING', 'true').lower() == 'true'
 RERANKER_MODEL = os.getenv('RERANKER_MODEL', 'BAAI/bge-reranker-v2-m3')
-RERANKER_TOP_K = int(os.getenv('RERANKER_TOP_K', '10'))
+RERANKER_TOP_K = int(os.getenv('RERANKER_TOP_K', '50'))
 
 # ✅ Token Management 설정
 MAX_MODEL_LEN = int(os.getenv('MAX_MODEL_LEN', '8192'))

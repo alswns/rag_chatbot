@@ -328,7 +328,7 @@ class VectorStoreManager:
         top_k: int = 5,
         use_hybrid: bool = True,
         use_graph: bool = True,
-        use_reranking: bool = True,
+        use_reranking: bool = False,
         graph_depth: int = 1
     ) -> List[Dict[str, Any]]:
         """

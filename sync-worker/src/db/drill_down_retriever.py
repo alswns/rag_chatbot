@@ -52,7 +52,7 @@ class GraphDrillDownRetriever:
         
     Step 3: 범위 내 정밀 검색 (Scoped Vector Search)
         - 수집된 범위 내에서만 벡터 검색
-        - Cross-Encoder Reranking 적용
+        - Cross-Encoder Reranking (기본적으로 비활성화)
     """
     
     def __init__(
@@ -87,7 +87,7 @@ class GraphDrillDownRetriever:
         query: str,
         k: int = 5,
         hub_k: int = 3,
-        use_reranking: bool = True
+        use_reranking: bool = False
     ) -> List[RetrievedDocument]:
         """
         3단계 드릴다운 검색 수행

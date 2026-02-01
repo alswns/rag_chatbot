@@ -318,25 +318,40 @@ class ModelManager:
 class QuestionAnsweringManager:
     """DeepSeek-R1 기반 답변 생성"""
     
-    SYSTEM_PROMPT = """당신은 개발자를 돕는 **'한국어 네이티브 기술 전문가 AI'**입니다.
-당신의 모든 사고 회로와 출력 장치는 **오직 한국어**로만 작동하도록 하드코딩되어 있습니다.
+    SYSTEM_PROMPT = """# 시스템 설정: 한국어 전용 RAG 어시스턴트
 
-[💀 1. 언어 통제 프로토콜 (절대 엄수)]
-- **사고 과정(<think>) 통제**: 질문을 분석하는 순간부터 **무조건 한국어로 생각**하세요. (예: "음, 사용자가 보고서를 요청했군..." O / "Hmm, user asked..." X)
-- **중국어/일본어 완전 차단**: 생각이나 답변에 중국어(간체/번체)가 단 한 글자라도 섞이면 시스템 치명적 오류입니다. 절대 금지합니다.
-- **용어 원칙**: 기술 고유명사(Docker, Kubernetes, ROE 등)는 **영어 원문**을 유지하고, 그 외 모든 서술어와 조사는 **자연스러운 한국어**를 사용하세요.
+## 🚨 최우선 규칙: 언어 제한 (CRITICAL)
+1. **출력 언어**: 모든 응답은 반드시 **한국어**로만 작성합니다.
+2. **중국어 절대 금지**: 简体中文, 繁體中文, 일본어(日本語) 등 **비한국어 문자는 단 한 글자도 사용하지 마세요.**
+3. **사고 과정도 한국어**: <think> 태그 내부도 반드시 한국어로 사고합니다.
+4. **영어 허용 범위**: 기술 고유명사(Docker, API, Python 등)와 코드만 영어 허용.
 
-[📄 2. RAG 데이터 처리 규칙]
-- 제공된 <documents> 태그 안의 내용이 **유일한 진실**입니다.
-- **통합적 사고**: 문서가 여러 조각(Chunk)으로 나뉘어 있어도, 전체 맥락을 연결하여(Synthesize) 하나의 완결된 스토리로 답변하세요.
-- **데이터 공백**: 만약 문서 내용이 URL뿐이거나 질문과 전혀 무관하다면, 말을 지어내지 말고 정직하게 "제공된 문서에는 관련 정보가 없습니다."라고 답하세요.
+## 📋 역할 정의
+당신은 **한국어 RAG 전문 어시스턴트**입니다. 사용자가 제공한 문서(<context>)를 기반으로 정확하고 간결한 답변을 제공합니다.
 
-[✍️ 3. 답변 작성 가이드]
-- **구조화**: 서론-본론-결론 보다는, **핵심 요약**을 먼저 제시하고 세부 내용을 **불렛 포인트(-)**로 정리하세요.
-- **출처 표기**: 정보의 근거가 되는 부분은 가능한 경우 "(출처: 문서 1)"과 같이 표기하세요.
-- **어조**: 간결하고 드라이(Dry)한 전문 개발자 톤을 유지하세요. (불필요한 미사여구 생략)
+## 📄 문서 처리 규칙
+1. **문서 우선**: <context> 태그 안의 내용이 **유일한 정보 소스**입니다.
+2. **정보 통합**: 여러 문서 조각이 있으면 맥락을 연결해 하나의 완결된 답변을 구성하세요.
+3. **정보 없음 처리**: 문서에 관련 정보가 없으면 솔직하게 "제공된 문서에는 해당 정보가 없습니다."라고 답하세요.
+4. **추측 금지**: 문서에 없는 내용을 지어내지 마세요.
 
-사용자 질문:"""
+## ✍️ 답변 형식
+1. **핵심 먼저**: 질문에 대한 핵심 답변을 첫 문장에 제시합니다.
+2. **구조화**: 세부 내용은 불렛 포인트(-)로 정리합니다.
+3. **간결함**: 불필요한 미사여구 없이 드라이한 전문가 톤을 유지합니다.
+4. **출처 표기**: 가능한 경우 "(문서 N)" 형식으로 출처를 표기합니다.
+
+## 🔧 응답 예시
+질문: "Docker란 무엇인가요?"
+답변:
+Docker는 애플리케이션을 컨테이너로 패키징하고 실행하는 플랫폼입니다. (문서 1)
+
+- **컨테이너**: 앱과 의존성을 격리된 환경에서 실행
+- **이미지**: 컨테이너의 템플릿 역할
+- **장점**: 환경 일관성, 빠른 배포, 리소스 효율성
+
+---
+위 규칙을 엄격히 준수하며, 이제 사용자 질문에 답변하세요."""
     
     @staticmethod
     def extract_user_message(messages: List[ChatMessage]) -> Optional[str]:
@@ -365,52 +380,91 @@ class QuestionAnsweringManager:
         messages: List[Dict],
         temperature: float = 0.6,
         max_tokens: Optional[int] = 2048,
-        stream: bool = False
+        stream: bool = False,
+        max_retries: int = 3,
+        retry_delay: float = 2.0
     ) -> Any:
-        """vLLM 호출"""
+        """
+        vLLM 호출 (재시도 로직 포함)
+        
+        Args:
+            messages: 대화 메시지
+            temperature: 샘플링 온도
+            max_tokens: 최대 토큰 수
+            stream: 스트리밍 여부
+            max_retries: 최대 재시도 횟수
+            retry_delay: 재시도 대기 시간 (초)
+        """
         global vllm_client
         
         if vllm_client is None:
             vllm_client = openai.OpenAI(
                 api_key='sk-not-needed',
-                base_url=VLLM_API_URL
+                base_url=VLLM_API_URL,
+                timeout=60.0
             )
         
-        try:
-            logger.info('📡 vLLM 호출 중...')
-            
-
-            
-            response = vllm_client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=messages,
-                temperature=temperature,
-                top_p=0.95,
-                max_tokens=max_tokens,
-                stream=stream,
-                stop=[
-                    "<|file_sep|>",
-                    "### <CONTEXT>",
-                    "---",
-                    "[관련 문서 없음]",
-                    "<｜end of sentence｜>"
-                ],
+        last_error = None
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.info(f'📡 vLLM 호출 중... (시도 {attempt}/{max_retries})')
                 
-            )
-            
-            logger.info('✅ vLLM 응답 수신')
-            return response
-            
-        except Exception as e:
-            logger.error(f'❌ vLLM 호출 실패: {str(e)}', exc_info=True)
-            raise
+                response = vllm_client.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=messages,
+                    temperature=temperature,
+                    top_p=0.95,
+                    max_tokens=max_tokens,
+                    stream=stream,
+                    stop=[
+                        "<|file_sep|>",
+                        "### <CONTEXT>",
+                        "[관련 문서 없음]",
+                        "<｜end of sentence｜>",
+                        "好，",  # 중국어 시작 패턴 차단
+                        "首先",  # 중국어 시작 패턴 차단
+                        "接下来",  # 중국어 시작 패턴 차단
+                    ],
+                )
+                
+                logger.info('✅ vLLM 응답 수신')
+                return response
+                
+            except openai.APIConnectionError as e:
+                last_error = e
+                logger.warning(f'⚠️ vLLM 연결 실패 (시도 {attempt}/{max_retries}): {str(e)[:50]}')
+                if attempt < max_retries:
+                    time.sleep(retry_delay * attempt)  # 점진적 대기
+                    # 클라이언트 재초기화
+                    vllm_client = openai.OpenAI(
+                        api_key='sk-not-needed',
+                        base_url=VLLM_API_URL,
+                        timeout=60.0
+                    )
+            except Exception as e:
+                last_error = e
+                logger.error(f'❌ vLLM 호출 실패: {str(e)}')
+                if attempt < max_retries:
+                    time.sleep(retry_delay)
+                else:
+                    break
+        
+        logger.error(f'❌ vLLM 호출 최종 실패: {str(last_error)}', exc_info=True)
+        raise last_error
     
     @staticmethod
     def stream_response(response) -> Generator[str, None, None]:
-        """스트리밍 응답 생성"""
+        """스트리밍 응답 생성 (중국어 필터링 포함)"""
+        import re
+        
+        # 중국어 문자 감지 패턴 (한자 범위)
+        chinese_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf]')
+        
         try:
             in_think = False
             chunk_count = 0
+            chinese_detected = False
             
             for chunk in response:
                 chunk_count += 1
@@ -429,6 +483,11 @@ class QuestionAnsweringManager:
                         if '<think>' in content:
                             in_think = True
                         
+                        # 중국어 감지 시 스킵
+                        if chinese_pattern.search(content):
+                            chinese_detected = True
+                            continue
+                        
                         if not in_think:
                             data = {
                                 "id": f"chatcmpl-{datetime.now().timestamp()}",
@@ -446,6 +505,9 @@ class QuestionAnsweringManager:
                         if '</think>' in content:
                             in_think = False
             
+            if chinese_detected:
+                logger.warning('⚠️ 중국어 출력 감지 및 필터링됨')
+            
             logger.info(f'✅ 스트리밍 완료 ({chunk_count}개 청크)')
             
             # 종료
@@ -459,16 +521,74 @@ class QuestionAnsweringManager:
 
 # ==================== 초기화 ====================
 
+def wait_for_vllm(max_retries: int = 30, retry_interval: int = 10) -> bool:
+    """
+    vLLM 서버가 준비될 때까지 대기
+    
+    Args:
+        max_retries: 최대 재시도 횟수
+        retry_interval: 재시도 간격 (초)
+    
+    Returns:
+        성공 여부
+    """
+    global vllm_client
+    
+    logger.info(f'⏳ vLLM 서버 연결 대기 중... (최대 {max_retries * retry_interval}초)')
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            # vLLM 클라이언트 초기화
+            if vllm_client is None:
+                vllm_client = openai.OpenAI(
+                    api_key='sk-not-needed',
+                    base_url=VLLM_API_URL,
+                    timeout=30.0
+                )
+            
+            # 모델 목록 조회로 연결 테스트
+            models = vllm_client.models.list()
+            logger.info(f'✅ vLLM 연결 성공 (시도 {attempt}/{max_retries})')
+            return True
+            
+        except Exception as e:
+            logger.warning(f'⏳ vLLM 연결 대기 중... ({attempt}/{max_retries}) - {str(e)[:50]}')
+            if attempt < max_retries:
+                time.sleep(retry_interval)
+            else:
+                logger.error(f'❌ vLLM 연결 실패: {max_retries}회 시도 후 포기')
+                return False
+    
+    return False
+
+
+def preload_embedding_service():
+    """
+    임베딩 서비스 사전 로드 (HuggingFace 모델 싱글톤)
+    """
+    try:
+        from utils.embedding_service import get_embedding_service
+        logger.info('🔄 임베딩 서비스 사전 로드 중...')
+        embedding_service = get_embedding_service()
+        logger.info(f'✅ 임베딩 서비스 로드 완료: {embedding_service.model_name}')
+    except Exception as e:
+        logger.warning(f'⚠️ 임베딩 서비스 사전 로드 실패: {str(e)}')
+
+
 @app.on_event('startup')
 async def startup():
     """서버 시작"""
-    global vector_store, graph_processor, drill_down_retriever, intent_router
+    global vector_store, graph_processor, drill_down_retriever, intent_router, vllm_client
     
     logger.info('=' * 70)
     logger.info('RAG API 시작 중...')
     logger.info('=' * 70)
     
     try:
+        # 0️⃣ 임베딩 서비스 사전 로드 (HuggingFace 모델)
+        logger.info('0️⃣  임베딩 서비스 사전 로드...')
+        preload_embedding_service()
+        
         # 1️⃣ 벡터 DB 초기화
         logger.info('1️⃣  벡터 DB 초기화...')
         vector_store = VectorStoreManager(
@@ -516,8 +636,12 @@ async def startup():
         else:
             logger.info('ℹ️  Drill-Down Retriever 미사용 (그래프 없음)')
         
-        # 5️⃣ 모델 정보 로드
-        logger.info('5️⃣  모델 정보 로드...')
+        # 5️⃣ vLLM 연결 대기
+        logger.info('5️⃣  vLLM 연결 대기...')
+        vllm_ready = wait_for_vllm(max_retries=30, retry_interval=10)
+        
+        # 6️⃣ 모델 정보 로드
+        logger.info('6️⃣  모델 정보 로드...')
         models = ModelManager.get_models()
         logger.info(f'✅ {len(models)}개 모델 감지')
         
@@ -527,6 +651,7 @@ async def startup():
         logger.info(f'   - Graph: {"✅" if graph else "❌"}')
         logger.info(f'   - Intent Router: {"✅" if intent_router else "❌"}')
         logger.info(f'   - Drill-Down Retriever: {"✅" if drill_down_retriever else "❌"}')
+        logger.info(f'   - vLLM: {"✅" if vllm_ready else "❌ (백그라운드 연결 시도)"}')
         logger.info('=' * 70)
         
     except Exception as e:

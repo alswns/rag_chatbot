@@ -136,12 +136,28 @@ class QueryGenerator:
 3. **프로젝트명, 파일명, 변수명, IP 주소 제거**
 4. 설명이나 접두어 없이 **오직 키워드만** 출력
 
-## 예시
+## ✨ Reference Resolution (지시어 해결)
+사용자의 질문에 **'이 링크', '그 사이트', '아까 말한 것', '거기'** 같은 지시어가 있다면:
+1. [대화 히스토리]를 참고하여 **정확한 대상(Entity) 이름이나 URL**을 찾으세요.
+2. 찾아낸 대상을 포함하여 검색 키워드로 변환하세요.
+
+**예시:**
+- 히스토리: "박민준의 깃허브는 https://github.com/park 입니다."
+- 사용자: "거기 있는 프로젝트 알려줘"
+- 출력: `site:github.com/park repositories` 또는 `Park Min-jun GitHub projects`
+
+- 히스토리: "선린인터넷고등학교에 대해 설명해줬."
+- 사용자: "그 학교 입학 요건은?"
+- 출력: `Sunrin Internet High School admission requirements`
+
+## 일반 예시
 - 입력: "우리 프로젝트의 FastAPI 비동기 처리 방법"
 - 출력: fastapi async processing tutorial
 
 - 입력: "최신 리액트 버전"
 - 출력: latest react version 2026
+
+{history_context}
 
 ## 사용자 질문
 {query}
@@ -188,18 +204,41 @@ class QueryGenerator:
         
         return cleaned
     
-    async def generate_query(self, query: str) -> str:
+    async def generate_query(self, query: str, history: List[Dict[str, str]] = None) -> str:
         """
-        검색 엔진용 쿼리 생성
+        검색 엔진용 쿼리 생성 (대화 히스토리 반영)
         
         Args:
             query: 사용자 질문
+            history: 대화 히스토리 [
+                {'role': 'user', 'content': '...'},
+                {'role': 'assistant', 'content': '...'}
+            ]
         
         Returns:
             세탁된 영어 검색어
         """
         try:
-            prompt = self.GENERATION_PROMPT.format(query=query)
+            # 히스토리 문맥 구성 (최근 3턴만)
+            history_context = ""
+            if history:
+                recent_history = history[-6:]  # 최근 3턴 (user+assistant * 3)
+                history_lines = []
+                for msg in recent_history:
+                    role = msg.get('role', '')
+                    content = msg.get('content', '')[:200]  # 200자 제한
+                    if role == 'user':
+                        history_lines.append(f"User: {content}")
+                    elif role == 'assistant':
+                        history_lines.append(f"Assistant: {content}")
+                
+                if history_lines:
+                    history_context = "## [대화 히스토리] (최근 3턴)\n" + "\n".join(history_lines) + "\n"
+            
+            prompt = self.GENERATION_PROMPT.format(
+                query=query,
+                history_context=history_context
+            )
             
             client = self._get_client()
             response = client.chat.completions.create(

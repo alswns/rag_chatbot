@@ -88,11 +88,16 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
                 
                 web_service = get_web_search_service()
                 
-                # 웹 검색 수행 (force_search 플래그 전달)
+                # 대화 히스토리 준비 (최근 3턴)
+                history = [msg for msg in request.messages[:-1] if msg.role in ['user', 'assistant']]
+                history_context = [{'role': msg.role, 'content': msg.content} for msg in history[-6:]]
+                
+                # 웹 검색 수행 (force_search 플래그 + history 전달)
                 web_context = await web_service.search_if_needed(
                     user_query=user_message,
                     internal_context=context,
-                    force_search=force_web_search
+                    force_search=force_web_search,
+                    history=history_context
                 )
                 
                 if web_context:

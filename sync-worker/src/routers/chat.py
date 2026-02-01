@@ -84,21 +84,19 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
                 logger.info(f'✅ Pre-check: 내부 문서 충분 ({context_length}자) → LLM 판단 요청')
             
             try:
-                from utils.web_search import get_search_decision_maker
+                from utils.web_search import get_web_search_service
                 
-                decision_maker = get_search_decision_maker()
+                web_service = get_web_search_service()
                 
-                # force_search 플래그 전달
-                decision = await decision_maker.decide_and_sanitize(
+                # 웹 검색 수행 (force_search 플래그 전달)
+                web_context = await web_service.search_if_needed(
                     user_query=user_message,
-                    internal_documents=VectorSearchManager._last_search_results,
+                    internal_context=context,
                     force_search=force_web_search
                 )
                 
-                if decision != 'NO_SEARCH':
-                    logger.info(f'🌐 웹 검색 실행: "{decision}"')
-                    web_results = await decision_maker.search(decision)
-                    web_context = decision_maker.format_web_results(web_results)
+                if web_context:
+                    logger.info(f'🌐 웹 검색 결과 획득: {len(web_context)}자')
                 else:
                     logger.info('ℹ️  웹 검색 스킵')
                     

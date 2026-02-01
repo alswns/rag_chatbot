@@ -118,12 +118,12 @@ services:
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=8010
       - LOG_LEVEL=INFO
-      - SEARCH_TOP_K=5
+      - SEARCH_TOP_K=${SEARCH_TOP_K:-5}
 
       # ✅ Reranking 활성화 (정확도 향상)
       - ENABLE_RERANKING=true
       - RERANKER_MODEL=BAAI/bge-reranker-v2-m3
-      - RERANKER_TOP_K=50
+      - RERANKER_TOP_K=${RERANKER_TOP_K:-50}
 
     volumes:
       - ./sync-worker/src:/app/src

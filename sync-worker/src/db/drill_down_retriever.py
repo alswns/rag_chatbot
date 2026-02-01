@@ -576,17 +576,36 @@ class GraphDrillDownRetriever:
         return documents, context
     
     def _format_as_xml(self, documents: List[RetrievedDocument]) -> str:
-        """XML 형식으로 컨텍스트 포맷"""
+        """
+        XML 형식으로 컨텍스트 포맷
+        
+        Fix: Prevent OOM on L4 GPU - Context Explosion 방지
+        - 부모 노드가 3000자 초과시 검색된 청크 주변 ±1000자만 포함
+        """
         if not documents:
             return "<context>검색된 문서가 없습니다.</context>"
+        
+        MAX_PARENT_LENGTH = 3000  # ~5k tokens
+        WINDOW_SIZE = 1000  # ±1000자 윈도우
         
         lines = ["<context>"]
         for i, doc in enumerate(documents, 1):
             title = doc.metadata.get('title', 'Untitled')
             source = doc.metadata.get('source_url', '')
+            content = doc.content
+            
+            # Fix: Prevent context explosion - 부모 노드 텍스트 길이 체크
+            if len(content) > MAX_PARENT_LENGTH:
+                # 청크 주변 ±WINDOW_SIZE 추출 (간소화: 중간 부분만)
+                start = max(0, len(content) // 2 - WINDOW_SIZE)
+                end = min(len(content), start + (WINDOW_SIZE * 2))
+                trimmed_content = f"[...전략...]\n{content[start:end]}\n[...후략...]"
+                
+                logger.debug(f'📏 문서 "{title}" 길이 제한: {len(content)} → {len(trimmed_content)}자')
+                content = trimmed_content
             
             lines.append(f'  <document id="{i}" title="{title}">')
-            lines.append(f'    <content>{doc.content}</content>')
+            lines.append(f'    <content>{content}</content>')
             if source:
                 lines.append(f'    <source>{source}</source>')
             lines.append(f'  </document>')

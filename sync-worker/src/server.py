@@ -152,6 +152,7 @@ vector_store: Optional[VectorStoreManager] = None
 graph_processor: Optional['GraphRAGProcessor'] = None
 drill_down_retriever: Optional['GraphDrillDownRetriever'] = None
 intent_router: Optional['ScalableIntentRouter'] = None
+semantic_router: Optional['SemanticIntentRouter'] = None  # Fix: Embedding-based Intent Router
 vllm_client: Optional[openai.OpenAI] = None
 available_models: List[Dict[str, Any]] = []
 
@@ -195,21 +196,21 @@ class TokenManager:
     @staticmethod
     def estimate_tokens(text: str) -> int:
         """
-        토큰 수 추정 (개선된 정확도)
-        - 한글: ~1.2 chars/token (더 정확한 추정)
+        토큰 수 추정 (Qwen2.5 최적화)
+        - 한글: ~2.0 chars/token (Qwen 토크나이저 특성 반영)
         - 영어/숫자: ~3.5 chars/token (vLLM 기준)
         - 특수문자/공백: ~1.5 chars/token
         """
         if not text:
             return 0
         
-        # 한글, 영어, 특수문자 구분
+        # Fix: Qwen 토크나이저는 한글을 더 잘게 쪼개므로 가중치 상향
         korean_chars = len(re.findall(r'[가-힣]', text))
         english_chars = len(re.findall(r'[a-zA-Z0-9]', text))
         other_chars = len(text) - korean_chars - english_chars
         
-        # 더 정확한 토큰 추정
-        korean_tokens = korean_chars / 1.2
+        # Qwen2.5 실측 기준 가중치
+        korean_tokens = korean_chars / 2.0  # 1.2 → 2.0 상향
         english_tokens = english_chars / 3.5
         other_tokens = other_chars / 1.5
         
@@ -267,11 +268,32 @@ class TokenManager:
         
         fixed_tokens = system_tokens + query_tokens + 50 # 여유분 살짝 추가
         
-        # 🚨 [예외 처리] 만약 컨텍스트+질문 만으로 이미 한계를 넘었다면?
+        # 🚨 [Critical Fix] 컨텍스트+질문이 한계 초과 시 context 강제 트리밍
         if fixed_tokens > effective_limit:
-            logger.warning(f"⚠️ 컨텍스트가 너무 길어 자릅니다. ({fixed_tokens} > {effective_limit})")
-            # 이 경우 context 문자열 자체를 슬라이싱해서 강제로 줄이는 로직이 필요할 수 있습니다.
-            fixed_tokens = effective_limit 
+            excess_tokens = fixed_tokens - effective_limit
+            # Fix: Prevent OOM on L4 GPU - 초과 토큰 * 3글자 제거 (안전 여유)
+            chars_to_remove = int(excess_tokens * 3)
+            
+            if context and len(context) > chars_to_remove:
+                trimmed_context = context[:-chars_to_remove]
+                logger.warning(f"⚠️ Context 강제 트리밍: {len(context)} → {len(trimmed_context)}자 (초과 {excess_tokens} 토큰)")
+                
+                # 재계산
+                full_system = f"""{system_prompt}
+            ---
+            ### 제공된 참고 문서 (Reference Context)
+            사용자의 질문에 답변하기 위해 아래의 문서들을 최우선으로 참고하세요.
+
+            <context>
+            {trimmed_context}
+            </context>
+            ---
+            """
+                system_tokens = TokenManager.estimate_tokens(full_system)
+                fixed_tokens = system_tokens + query_tokens + 50
+            else:
+                logger.error(f"❌ Context 트리밍 실패: 여전히 초과 ({fixed_tokens} > {effective_limit})")
+                fixed_tokens = effective_limit 
 
         remaining_tokens = effective_limit - fixed_tokens
         
@@ -303,6 +325,93 @@ class TokenManager:
         logger.info(f'✅ 토큰 관리 완료: 히스토리 {len(selected_history)}개, 예측 총합 ~{final_input_tokens} (한도 {max_tokens})')
         
         return messages
+
+
+# ==================== Semantic Intent Router (Embedding-based, No LLM) ====================
+
+class SemanticIntentRouter:
+    """
+    ✅ LLM 없이 Embedding 기반 의도 분류
+    
+    - 메모리 효율: 기존 embedding_service 재사용
+    - 속도: cosine_similarity로 즉시 분류
+    - GPU 절약: No LLM inference
+    """
+    
+    # Intent별 Anchor 문장들
+    INTENT_ANCHORS = {
+        'coding': [
+            "코드 작성해줘",
+            "에러 수정해줘",
+            "함수 구현",
+            "디버깅 도와줘",
+            "코드 리뷰",
+            "버그 찾아줘"
+        ],
+        'explanation': [
+            "설명해줘",
+            "이게 무슨 뜻이야",
+            "개념 알려줘",
+            "어떻게 작동하는지",
+            "원리가 뭐야",
+            "차이점이 뭐야"
+        ],
+        'chat': [
+            "안녕",
+            "반가워",
+            "너 누구니",
+            "고마워",
+            "괜찮아",
+            "알겠어"
+        ]
+    }
+    
+    def __init__(self, embedding_service):
+        """Fix: Prevent GPU memory waste - 기존 embedding_service 재사용"""
+        self.embedding_service = embedding_service
+        self.anchor_embeddings = {}
+        self._build_anchors()
+    
+    def _build_anchors(self) -> None:
+        """Anchor 문장들의 평균 임베딩 생성"""
+        for intent, anchors in self.INTENT_ANCHORS.items():
+            embeddings = self.embedding_service.encode(anchors)
+            # 평균 임베딩 계산
+            avg_embedding = embeddings.mean(axis=0)
+            self.anchor_embeddings[intent] = avg_embedding
+        
+        logger.info(f"✅ SemanticIntentRouter 초기화: {len(self.anchor_embeddings)}개 Intent")
+    
+    def classify(self, query: str, threshold: float = 0.5) -> tuple[str, float]:
+        """
+        쿼리를 분류하여 Intent와 신뢰도 반환
+        
+        Returns:
+            (intent, confidence) - 예: ('coding', 0.82)
+        """
+        from sklearn.metrics.pairwise import cosine_similarity
+        import numpy as np
+        
+        query_embedding = self.embedding_service.encode([query])[0]
+        
+        max_similarity = -1.0
+        best_intent = 'explanation'  # default
+        
+        for intent, anchor_emb in self.anchor_embeddings.items():
+            similarity = cosine_similarity(
+                query_embedding.reshape(1, -1),
+                anchor_emb.reshape(1, -1)
+            )[0][0]
+            
+            if similarity > max_similarity:
+                max_similarity = similarity
+                best_intent = intent
+        
+        # threshold 이하면 'explanation' (안전한 기본값)
+        if max_similarity < threshold:
+            return 'explanation', max_similarity
+        
+        return best_intent, float(max_similarity)
 
 
 # ==================== 1️⃣ 벡터 DB 검색 (RAG) - Async 전환 ====================
@@ -518,8 +627,8 @@ class ModelManager:
 class QuestionAnsweringManager:
     """DeepSeek-R1 기반 답변 생성 (Production-Ready)"""
     
-    # ✅ 3️⃣ Structured Prompt: Context는 별도로 주입됨
-    SYSTEM_PROMPT = """당신은 소프트웨어 엔지니어링 분야의 **수석 엔지니어(Senior Technical Lead) 어시스턴트**입니다.
+    # ✅ Base Persona (공통)
+    BASE_PERSONA = """당신은 소프트웨어 엔지니어링 분야의 **수석 엔지니어(Senior Technical Lead) 어시스턴트**입니다.
 사용자의 질문에 대해 제공된 **Context(맥락)**를 바탕으로 가장 정확하고 기술적으로 깊이 있는 답변을 제공해야 합니다.
 
 ## 1. 답변 원칙 (Core Principles)
@@ -536,6 +645,47 @@ class QuestionAnsweringManager:
 - **두괄식:** 결론이나 핵심 해결책을 먼저 제시하고, 그 뒤에 상세 설명이나 근거를 덧붙입니다.
 - **구조화:** 긴 설명이 필요할 경우 번호 매기기(1., 2.)나 불렛 포인트(-)를 사용하여 가독성을 높입니다.
 - **전문성:** 초보자용 비유보다는 엔지니어 간의 대화처럼 명확하고 직관적인 기술 용어를 사용합니다."""
+    
+    # ✅ Intent별 동적 지침 (Dynamic Persona Injection)
+    INTENT_INSTRUCTIONS = {
+        'coding': """
+
+## 🎯 추가 지침 (코드 작성 모드)
+- **코드 우선:** 설명은 간결하게, 코드는 주석을 포함하여 완벽하게 작성하라.
+- **실행 가능:** 코드 스니펫은 복사-붙여넣기 즉시 실행 가능해야 한다.
+- **엣지 케이스:** 에러 처리와 경계 조건을 반드시 포함하라.""",
+        
+        'explanation': """
+
+## 🎯 추가 지침 (개념 설명 모드)
+- **비유 활용:** 초보자도 이해하기 쉽게 일상적 비유를 사용하라.
+- **단계별:** 복잡한 개념은 작은 단위로 쪼개어 단계별로 설명하라.
+- **시각화:** 가능하면 다이어그램이나 플로우차트 형태로 표현하라.""",
+        
+        'chat': """
+
+## 🎯 추가 지침 (일반 대화 모드)
+- **친근함:** 기술적 깊이보다는 친절하고 간결한 답변을 우선하라.
+- **간결성:** 불필요한 상세 설명은 생략하라."""
+    }
+    
+    # ✅ 통합 시스템 프롬프트 (호환성 유지)
+    SYSTEM_PROMPT = BASE_PERSONA
+    
+    @staticmethod
+    def get_dynamic_prompt(intent: str = 'explanation') -> str:
+        """
+        Intent에 따른 동적 시스템 프롬프트 생성
+        
+        Args:
+            intent: 'coding', 'explanation', 'chat'
+        
+        Returns:
+            확장된 시스템 프롬프트
+        """
+        base = QuestionAnsweringManager.BASE_PERSONA
+        instruction = QuestionAnsweringManager.INTENT_INSTRUCTIONS.get(intent, '')
+        return base + instruction
     
     @staticmethod
     def extract_user_message(messages: List[ChatMessage]) -> Optional[str]:
@@ -563,10 +713,11 @@ class QuestionAnsweringManager:
         global vllm_client
         
         if vllm_client is None:
+            # Fix: Extend timeout for 16k context processing on L4 GPU
             vllm_client = openai.OpenAI(
                 api_key='sk-not-needed',
                 base_url=VLLM_API_URL,
-                timeout=60.0
+                timeout=180.0  # 60 → 180초 연장
             )
         
         last_error = None
@@ -600,7 +751,7 @@ class QuestionAnsweringManager:
                     vllm_client = openai.OpenAI(
                         api_key='sk-not-needed',
                         base_url=VLLM_API_URL,
-                        timeout=60.0
+                        timeout=180.0  # Fix: 16k context support
                     )
             except Exception as e:
                 last_error = e
@@ -737,7 +888,7 @@ def preload_reranker():
 @app.on_event('startup')
 async def startup():
     """서버 시작"""
-    global vector_store, graph_processor, drill_down_retriever, intent_router, vllm_client
+    global vector_store, graph_processor, drill_down_retriever, intent_router, vllm_client, semantic_router
     
     logger.info('=' * 70)
     logger.info('🚀 RAG API 시작 중... (Production-Ready v2.0)')
@@ -799,6 +950,17 @@ async def startup():
         else:
             logger.info('ℹ️  Drill-Down Retriever 미사용 (그래프 없음)')
         
+        # 5️⃣ Semantic Intent Router 초기화
+        logger.info('5️⃣  Semantic Intent Router 초기화...')
+        try:
+            from utils.embedding_service import get_embedding_service
+            embedding_service = get_embedding_service()
+            semantic_router = SemanticIntentRouter(embedding_service)
+            logger.info(f'✅ Semantic Intent Router 준비 (No LLM)')
+        except Exception as e:
+            logger.warning(f'⚠️  Semantic Intent Router 초기화 실패: {str(e)}')
+            semantic_router = None
+        
         # 5️⃣ vLLM 연결 대기
         logger.info('5️⃣  vLLM 연결 대기...')
         vllm_ready = wait_for_vllm(max_retries=30, retry_interval=10)
@@ -828,7 +990,18 @@ async def startup():
 @app.on_event('shutdown')
 async def shutdown():
     """서버 종료 시 리소스 정리"""
+    global vllm_client, executor
+    
     logger.info('🛑 서버 종료 중...')
+    
+    # Fix: Resource cleanup for L4 GPU
+    if vllm_client:
+        try:
+            vllm_client.close()
+            logger.info('✅ vLLM Client 정리 완료')
+        except Exception as e:
+            logger.warning(f'⚠️ vLLM Client 정리 실패: {str(e)}')
+    
     executor.shutdown(wait=True)
     logger.info('✅ ThreadPool 정리 완료')
 
@@ -865,6 +1038,7 @@ async def health_check() -> Dict:
                 'graph': graph_processor is not None,
                 'intent_router': intent_router is not None,
                 'drill_down_retriever': drill_down_retriever is not None,
+                'semantic_router': semantic_router is not None,
                 'reranking': ENABLE_RERANKING
             }
         }
@@ -966,15 +1140,27 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
             context = await VectorSearchManager.search(user_message, top_k=SEARCH_TOP_K)
             logger.info(f'검색 완료: {len(context)}자')
             
-            # 3️⃣ Smart Token Management + Structured Prompt
-            logger.info('Step 2: 토큰 관리 & 프롬프트 구성...')
+            # ✅ Semantic Intent 분류 (No LLM)
+            detected_intent = 'explanation'  # default
+            if semantic_router:
+                try:
+                    detected_intent, confidence = semantic_router.classify(user_message)
+                    logger.info(f'🎯 Intent: {detected_intent} (confidence={confidence:.2f})')
+                except Exception as e:
+                    logger.warning(f'⚠️ Intent 분류 실패: {str(e)}')
+            
+            # 3️⃣ Smart Token Management + ✅ Dynamic Persona Injection
+            logger.info('Step 2: 토큰 관리 & 동적 프롬프트 구성...')
             
             # 현재 메시지 이전의 히스토리 추출
             history = [msg for msg in request.messages[:-1] if msg.role in ['user', 'assistant']]
             
+            # ✅ Dynamic Persona: Intent에 따른 시스템 프롬프트 선택
+            dynamic_prompt = QuestionAnsweringManager.get_dynamic_prompt(detected_intent)
+            
             # ✅ TokenManager를 사용한 동적 컨텍스트 윈도우 관리
             vllm_messages = TokenManager.manage_context_window(
-                system_prompt=QuestionAnsweringManager.SYSTEM_PROMPT,
+                system_prompt=dynamic_prompt,  # ✅ Intent-aware prompt
                 context=context,
                 current_query=user_message,
                 history=history,

@@ -147,6 +147,53 @@ class VectorStoreManager:
         self.bm25_corpus: List[List[str]] = []
         self.bm25_doc_ids: List[str] = []
     
+    def retrieve_context(
+        self,
+        query: str,
+        top_k: int = 5,
+        use_hybrid: bool = False,
+        use_reranking: bool = False
+    ) -> str:
+        """
+        컨텍스트 검색 (Fallback용)
+        
+        Args:
+            query: 검색 쿼리
+            top_k: 반환할 문서 수
+            use_hybrid: 하이브리드 검색 사용 여부
+            use_reranking: Reranking 사용 여부
+        
+        Returns:
+            검색된 문서들의 텍스트
+        """
+        try:
+            # 쿼리 임베딩 생성
+            query_embedding = self.embedding_service.encode([query])[0].tolist()
+            
+            # ChromaDB 검색
+            results = self.collection.query(
+                query_embeddings=[query_embedding],
+                n_results=top_k,
+                include=['documents', 'metadatas', 'distances']
+            )
+            
+            if not results['ids'][0]:
+                return ""
+            
+            # 문서 포맷팅
+            documents = []
+            for i, doc_id in enumerate(results['ids'][0]):
+                content = results['documents'][0][i] if results['documents'] else ''
+                metadata = results['metadatas'][0][i] if results['metadatas'] else {}
+                title = metadata.get('title', 'Untitled')
+                documents.append(f"### {title}\n{content}\n")
+            
+            return '\n'.join(documents)
+            
+        except Exception as e:
+            logger.error(f'검색 실패: {str(e)}')
+            return ""
+    
     def add_documents(self, documents: List[Dict[str, Any]], batch_size: int = 100) -> int:
         """
         배치 단위로 문서를 벡터 저장소에 추가

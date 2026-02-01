@@ -466,8 +466,9 @@ class GraphDrillDownRetriever:
         if not results.get('ids'):
             return {'ids': [[]], 'documents': [[]], 'metadatas': [[]], 'distances': [[]]}
         
-        # 임베딩이 없으면 거리 계산 불가
-        if not results.get('embeddings'):
+        # Fix: 임베딩이 없으면 거리 계산 불가 (배열 비교 에러 방지)
+        embeddings = results.get('embeddings')
+        if embeddings is None or len(embeddings) == 0:
             return {
                 'ids': [results['ids'][:k]],
                 'documents': [results.get('documents', [''] * len(results['ids']))[:k]],

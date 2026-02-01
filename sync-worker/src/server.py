@@ -1,5 +1,5 @@
 """
-🚀 RAG Inference API Server - FastAPI 기반
+🚀 RAG Inference API Server - FastAPI 기반 (Production-Ready)
 
 3가지 핵심 역할:
 1. 벡터 DB 검색 (ChromaDB → XML 포맷 Context)
@@ -7,6 +7,12 @@
 3. 질의응답 (DeepSeek-R1 추론 → <think> 태그 필터링)
 
 Open WebUI와 완전 호환되는 OpenAI API 구현
+
+✅ Production-Ready 기능:
+- Async & Non-blocking I/O (ThreadPoolExecutor)
+- Smart Token Management (동적 컨텍스트 윈도우)
+- Structured Prompt Engineering (System Prompt에 Context 주입)
+- Observability (time_logger 데코레이터)
 """
 
 import os
@@ -14,8 +20,11 @@ import sys
 import logging
 import json
 import re
-from typing import Optional, List, Generator, Dict, Any
+import asyncio
+import functools
+from typing import Optional, List, Generator, Dict, Any, Callable
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 import time
 
 # 모듈 경로
@@ -64,12 +73,46 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+# ==================== 4️⃣ Observability: time_logger 데코레이터 ====================
+
+def time_logger(func: Callable) -> Callable:
+    """
+    ⏱️ 함수 실행 시간 측정 데코레이터
+    
+    동기/비동기 함수 모두 지원
+    """
+    @functools.wraps(func)
+    async def async_wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        try:
+            result = await func(*args, **kwargs)
+            return result
+        finally:
+            elapsed = time.perf_counter() - start
+            logger.info(f'⏱️ [{func.__name__}] {elapsed:.4f}초')
+    
+    @functools.wraps(func)
+    def sync_wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        try:
+            result = func(*args, **kwargs)
+            return result
+        finally:
+            elapsed = time.perf_counter() - start
+            logger.info(f'⏱️ [{func.__name__}] {elapsed:.4f}초')
+    
+    if asyncio.iscoroutinefunction(func):
+        return async_wrapper
+    return sync_wrapper
+
+
 # ==================== FastAPI 앱 ====================
 
 app = FastAPI(
     title='RAG Inference API',
-    description='Enterprise RAG - OpenAI Compatible (DeepSeek-R1)',
-    version='1.0.0'
+    description='Enterprise RAG - OpenAI Compatible (Production-Ready)',
+    version='2.0.0'
 )
 
 # ==================== 설정 ====================
@@ -81,8 +124,6 @@ OLLAMA_API_URL = os.getenv('OLLAMA_API_URL', 'http://localhost:11434')
 CHROMA_HOST = os.getenv('CHROMA_HOST', 'localhost')
 CHROMA_PORT = int(os.getenv('CHROMA_PORT', '8000'))
 GRAPH_PERSIST_PATH = os.getenv('GRAPH_PERSIST_PATH', './data/graph.pkl')
-# ✅ [업그레이드] Full Page Retrieval 적용: 페이지 전체를 가져오므로 개수를 5에서 2로 줄임
-# 2개만 찾아도 페이지 2개 분량이 통째로 들어가므로 충분함
 SEARCH_TOP_K = int(os.getenv('SEARCH_TOP_K', '2'))
 
 # ✅ Reranking 설정
@@ -90,9 +131,20 @@ ENABLE_RERANKING = os.getenv('ENABLE_RERANKING', 'true').lower() == 'true'
 RERANKER_MODEL = os.getenv('RERANKER_MODEL', 'BAAI/bge-reranker-v2-m3')
 RERANKER_TOP_K = int(os.getenv('RERANKER_TOP_K', '10'))
 
+# ✅ Token Management 설정
+MAX_MODEL_LEN = int(os.getenv('MAX_MODEL_LEN', '8192'))
+RESERVED_OUTPUT_TOKENS = int(os.getenv('RESERVED_OUTPUT_TOKENS', '1024'))
+MAX_CONTEXT_TOKENS = MAX_MODEL_LEN - RESERVED_OUTPUT_TOKENS
+
+# ✅ ThreadPool 설정 (Non-blocking I/O)
+THREAD_POOL_SIZE = int(os.getenv('THREAD_POOL_SIZE', '4'))
+executor = ThreadPoolExecutor(max_workers=THREAD_POOL_SIZE)
+
 logger.info(f'✅ 모델: {MODEL_NAME}')
 logger.info(f'✅ LLM Backend: {LLM_BACKEND.upper()}')
 logger.info(f'✅ Reranking: {"활성화" if ENABLE_RERANKING else "비활성화"} (모델: {RERANKER_MODEL if ENABLE_RERANKING else "N/A"})')
+logger.info(f'✅ Token Limit: {MAX_MODEL_LEN} (Output 예약: {RESERVED_OUTPUT_TOKENS})')
+logger.info(f'✅ ThreadPool: {THREAD_POOL_SIZE} workers')
 
 # ==================== 글로벌 변수 ====================
 
@@ -102,6 +154,7 @@ drill_down_retriever: Optional['GraphDrillDownRetriever'] = None
 intent_router: Optional['ScalableIntentRouter'] = None
 vllm_client: Optional[openai.OpenAI] = None
 available_models: List[Dict[str, Any]] = []
+
 
 # ==================== 데이터 모델 ====================
 
@@ -128,29 +181,149 @@ class ChatCompletionResponse(BaseModel):
     usage: Dict
 
 
-# ==================== 1️⃣ 벡터 DB 검색 (RAG) ====================
+# ==================== 2️⃣ Smart Token Management ====================
 
-class VectorSearchManager:
+class TokenManager:
     """
-    ✅ [업그레이드] Intent Router + Drill-Down Retriever 통합
+    ✅ Smart Token Management
     
-    검색 플로우:
-    1. Intent Router: 쿼리 의도 분류 (search_knowledge/chat/summary)
-    2. Drill-Down Retriever: 3단계 드릴다운 검색
-    3. 컨텍스트 포맷팅: XML 형식으로 반환
+    - 토큰 수 추정 (한글 1.5, 영어 1.0 char/token)
+    - 동적 컨텍스트 윈도우 관리
+    - 과거 대화 히스토리 최적화
     """
     
     @staticmethod
-    def search(query: str, top_k: int = SEARCH_TOP_K) -> str:
+    def estimate_tokens(text: str) -> int:
         """
-        ✅ [통합 검색] Intent 기반 라우팅 + 드릴다운 검색
+        토큰 수 추정 (근사치)
+        - 한글: ~1.5 chars/token
+        - 영어/숫자: ~4 chars/token (OpenAI 기준)
+        - 혼합 텍스트 평균: ~2 chars/token
+        """
+        if not text:
+            return 0
+        
+        # 한글 문자 수
+        korean_chars = len(re.findall(r'[가-힣]', text))
+        # 영어/숫자/특수문자
+        other_chars = len(text) - korean_chars
+        
+        # 한글은 1.5 char/token, 영어는 4 char/token
+        korean_tokens = korean_chars / 1.5
+        other_tokens = other_chars / 4
+        
+        return int(korean_tokens + other_tokens)
+    
+    @staticmethod
+    def estimate_messages_tokens(messages: List[Dict[str, str]]) -> int:
+        """메시지 리스트의 총 토큰 수 추정"""
+        total = 0
+        for msg in messages:
+            # role 토큰 (~4)
+            total += 4
+            # content 토큰
+            total += TokenManager.estimate_tokens(msg.get('content', ''))
+        return total
+    
+    @staticmethod
+    def manage_context_window(
+        system_prompt: str,
+        context: str,
+        current_query: str,
+        history: List[ChatMessage],
+        max_tokens: int = MAX_CONTEXT_TOKENS
+    ) -> List[Dict[str, str]]:
+        """
+        ✅ 동적 컨텍스트 윈도우 관리
+        
+        토큰 예산 내에서 최대한 많은 히스토리를 포함
         
         Args:
-            query: 검색 질문
-            top_k: 반환할 문서 개수
+            system_prompt: 시스템 프롬프트
+            context: 검색된 문서 컨텍스트
+            current_query: 현재 사용자 질문
+            history: 과거 대화 히스토리
+            max_tokens: 최대 허용 토큰 수
         
         Returns:
-            XML 형식의 컨텍스트
+            최적화된 메시지 리스트
+        """
+        messages = []
+        
+        # =====================================================
+        # Step 1: 고정 비용 계산 (System + Context + Current)
+        # =====================================================
+        
+        # 3️⃣ Structured Prompt: System Prompt에 Context 주입
+        if context:
+            full_system = f"""{system_prompt}
+
+### Reference Context
+<context>
+{context}
+</context>
+
+위 문서를 참고하여 사용자 질문에 답변하세요."""
+        else:
+            full_system = system_prompt
+        
+        system_tokens = TokenManager.estimate_tokens(full_system)
+        query_tokens = TokenManager.estimate_tokens(current_query)
+        
+        fixed_tokens = system_tokens + query_tokens + 20  # 여유분
+        remaining_tokens = max_tokens - fixed_tokens
+        
+        logger.debug(f'토큰 예산: 전체={max_tokens}, 고정={fixed_tokens}, 히스토리용={remaining_tokens}')
+        
+        # =====================================================
+        # Step 2: 히스토리 동적 포함 (최신 → 과거 순)
+        # =====================================================
+        
+        selected_history = []
+        history_tokens = 0
+        
+        # 역순으로 순회하며 토큰 예산 내에서 추가
+        for msg in reversed(history):
+            msg_tokens = TokenManager.estimate_tokens(msg.content) + 4  # role 포함
+            
+            if history_tokens + msg_tokens <= remaining_tokens:
+                selected_history.insert(0, {'role': msg.role, 'content': msg.content})
+                history_tokens += msg_tokens
+            else:
+                # 토큰 예산 초과 시 중단
+                break
+        
+        # =====================================================
+        # Step 3: 최종 메시지 조립
+        # =====================================================
+        
+        messages.append({'role': 'system', 'content': full_system})
+        messages.extend(selected_history)
+        messages.append({'role': 'user', 'content': current_query})
+        
+        total_tokens = TokenManager.estimate_messages_tokens(messages)
+        logger.info(f'📊 토큰 관리: 히스토리 {len(selected_history)}개 포함, 총 ~{total_tokens} 토큰')
+        
+        return messages
+
+
+# ==================== 1️⃣ 벡터 DB 검색 (RAG) - Async 전환 ====================
+
+class VectorSearchManager:
+    """
+    ✅ [Production-Ready] Intent Router + Drill-Down Retriever 통합
+    
+    - Non-blocking I/O: ThreadPoolExecutor 사용
+    - Observability: time_logger 데코레이터 적용
+    """
+    
+    @staticmethod
+    @time_logger
+    def _search_sync(query: str, top_k: int = SEARCH_TOP_K) -> str:
+        """
+        ✅ [동기 버전] 실제 검색 로직
+        
+        ThreadPoolExecutor에서 실행됨
         """
         if vector_store is None:
             logger.warning('❌ Vector Store 미초기화')
@@ -165,7 +338,6 @@ class VectorSearchManager:
                 intent_result = intent_router.route(query)
                 logger.info(f'🎯 Intent: {intent_result.intent} | Domain: {intent_result.domain} | Conf: {intent_result.confidence:.2f}')
                 
-                # 일상 대화는 검색 불필요
                 if intent_result.intent == 'chat':
                     logger.info('💬 일상 대화 감지 → 검색 스킵')
                     return ""
@@ -176,7 +348,6 @@ class VectorSearchManager:
             if drill_down_retriever is not None:
                 logger.info(f'🔍 드릴다운 검색 시작: "{query[:50]}..." (top_k={top_k}, rerank={ENABLE_RERANKING})')
                 
-                # ✅ Reranking 활성화: 더 많은 후보를 검색한 뒤 정렬
                 search_k = RERANKER_TOP_K if ENABLE_RERANKING else top_k
                 
                 documents = drill_down_retriever.retrieve(
@@ -186,10 +357,9 @@ class VectorSearchManager:
                 )
                 
                 if documents:
-                    # Reranking 후 상위 top_k개만 사용
                     documents = documents[:top_k]
                     context_xml = drill_down_retriever._format_as_xml(documents)
-                    logger.info(f'✅ 드릴다운 검색 완료: {len(documents)}개 문서 (Rerank: {ENABLE_RERANKING})')
+                    logger.info(f'✅ 드릴다운 검색 완료: {len(documents)}개 문서')
                     return context_xml
                 else:
                     logger.info('⚠️ 드릴다운 검색 결과 없음 → Fallback')
@@ -197,9 +367,8 @@ class VectorSearchManager:
             # =====================================================
             # Step 3: Fallback - 기존 검색 방식
             # =====================================================
-            logger.info(f'🔍 Fallback 검색: "{query[:50]}..." (top_k={top_k}, rerank={ENABLE_RERANKING})')
+            logger.info(f'🔍 Fallback 검색: "{query[:50]}..."')
             
-            # 기존 retrieve_context 사용 + Reranking
             context = vector_store.retrieve_context(
                 query, 
                 top_k=top_k, 
@@ -219,18 +388,24 @@ class VectorSearchManager:
             return ""
     
     @staticmethod
-    def search_with_intent(query: str, top_k: int = SEARCH_TOP_K) -> Dict[str, Any]:
+    async def search(query: str, top_k: int = SEARCH_TOP_K) -> str:
         """
-        ✅ [상세 버전] Intent 정보와 함께 검색 결과 반환
+        ✅ [비동기 버전] Non-blocking 검색
         
-        Returns:
-            {
-                'intent': {...},
-                'documents': [...],
-                'context': '...',
-                'search_type': 'drill_down' | 'fallback'
-            }
+        Event Loop를 차단하지 않고 ThreadPoolExecutor에서 실행
         """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            executor,
+            VectorSearchManager._search_sync,
+            query,
+            top_k
+        )
+    
+    @staticmethod
+    @time_logger
+    def _search_with_intent_sync(query: str, top_k: int = SEARCH_TOP_K) -> Dict[str, Any]:
+        """[동기 버전] Intent 포함 검색"""
         result = {
             'intent': None,
             'documents': [],
@@ -242,7 +417,6 @@ class VectorSearchManager:
             return result
         
         try:
-            # Intent 분류
             if intent_router is not None:
                 intent_result = intent_router.route(query)
                 result['intent'] = intent_result.to_dict()
@@ -251,7 +425,6 @@ class VectorSearchManager:
                     result['search_type'] = 'skip'
                     return result
             
-            # Drill-Down 검색
             if drill_down_retriever is not None:
                 documents = drill_down_retriever.retrieve(
                     query, 
@@ -264,7 +437,6 @@ class VectorSearchManager:
                     result['search_type'] = 'drill_down'
                     return result
             
-            # Fallback
             context = vector_store.retrieve_context(
                 query, 
                 top_k=top_k, 
@@ -279,6 +451,17 @@ class VectorSearchManager:
         except Exception as e:
             logger.error(f'❌ 검색 실패: {str(e)}')
             return result
+    
+    @staticmethod
+    async def search_with_intent(query: str, top_k: int = SEARCH_TOP_K) -> Dict[str, Any]:
+        """[비동기 버전] Intent 포함 Non-blocking 검색"""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            executor,
+            VectorSearchManager._search_with_intent_sync,
+            query,
+            top_k
+        )
 
 
 # ==================== 2️⃣ 모델 관리 ====================
@@ -288,15 +471,9 @@ class ModelManager:
     
     @staticmethod
     def get_models() -> List[Dict[str, Any]]:
-        """
-        사용 가능한 모델 목록 반환
-        
-        Returns:
-            OpenAI 호환 모델 정보
-        """
+        """사용 가능한 모델 목록 반환"""
         global available_models
         
-        # vLLM에서 모델 정보 가져오기 시도
         if not available_models:
             try:
                 logger.info('📡 vLLM 모델 정보 조회 중...')
@@ -314,36 +491,34 @@ class ModelManager:
             except Exception as e:
                 logger.warning(f'⚠️  vLLM 모델 조회 실패: {str(e)}')
         
-        # 폴백: 기본 모델 반환
         return [{
             'id': MODEL_NAME,
             'object': 'model',
             'created': int(datetime.now().timestamp()),
             'owned_by': 'vllm',
-            'permission': [
-                {
-                    'id': 'modelperm-default',
-                    'object': 'model_permission',
-                    'created': int(datetime.now().timestamp()),
-                    'allow_create_engine': False,
-                    'allow_sampling': True,
-                    'allow_logprobs': False,
-                    'allow_search_indices': False,
-                    'allow_view': True,
-                    'allow_fine_tuning': False,
-                    'organization': '*',
-                    'group_id': None,
-                    'is_blocking': False
-                }
-            ]
+            'permission': [{
+                'id': 'modelperm-default',
+                'object': 'model_permission',
+                'created': int(datetime.now().timestamp()),
+                'allow_create_engine': False,
+                'allow_sampling': True,
+                'allow_logprobs': False,
+                'allow_search_indices': False,
+                'allow_view': True,
+                'allow_fine_tuning': False,
+                'organization': '*',
+                'group_id': None,
+                'is_blocking': False
+            }]
         }]
 
 
 # ==================== 3️⃣ 질의응답 (LLM) ====================
 
 class QuestionAnsweringManager:
-    """DeepSeek-R1 기반 답변 생성"""
+    """DeepSeek-R1 기반 답변 생성 (Production-Ready)"""
     
+    # ✅ 3️⃣ Structured Prompt: Context는 별도로 주입됨
     SYSTEM_PROMPT = """당신은 한국어로 답변하는 RAG 어시스턴트입니다.
 
 ## 핵심 규칙
@@ -380,6 +555,7 @@ class QuestionAnsweringManager:
         return "", text
     
     @staticmethod
+    @time_logger
     def call_llm(
         messages: List[Dict],
         temperature: float = 0.6,
@@ -390,14 +566,6 @@ class QuestionAnsweringManager:
     ) -> Any:
         """
         vLLM 호출 (재시도 로직 포함)
-        
-        Args:
-            messages: 대화 메시지
-            temperature: 샘플링 온도
-            max_tokens: 최대 토큰 수
-            stream: 스트리밍 여부
-            max_retries: 최대 재시도 횟수
-            retry_delay: 재시도 대기 시간 (초)
         """
         global vllm_client
         
@@ -426,9 +594,9 @@ class QuestionAnsweringManager:
                         "### <CONTEXT>",
                         "[관련 문서 없음]",
                         "<｜end of sentence｜>",
-                        "好，",  # 중국어 시작 패턴 차단
-                        "首先",  # 중국어 시작 패턴 차단
-                        "接下来",  # 중국어 시작 패턴 차단
+                        "好，",
+                        "首先",
+                        "接下来",
                     ],
                 )
                 
@@ -439,8 +607,7 @@ class QuestionAnsweringManager:
                 last_error = e
                 logger.warning(f'⚠️ vLLM 연결 실패 (시도 {attempt}/{max_retries}): {str(e)[:50]}')
                 if attempt < max_retries:
-                    time.sleep(retry_delay * attempt)  # 점진적 대기
-                    # 클라이언트 재초기화
+                    time.sleep(retry_delay * attempt)
                     vllm_client = openai.OpenAI(
                         api_key='sk-not-needed',
                         base_url=VLLM_API_URL,
@@ -458,11 +625,26 @@ class QuestionAnsweringManager:
         raise last_error
     
     @staticmethod
+    async def call_llm_async(
+        messages: List[Dict],
+        temperature: float = 0.6,
+        max_tokens: Optional[int] = 2048,
+        stream: bool = False
+    ) -> Any:
+        """
+        ✅ [비동기 버전] vLLM 호출
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            executor,
+            lambda: QuestionAnsweringManager.call_llm(
+                messages, temperature, max_tokens, stream
+            )
+        )
+    
+    @staticmethod
     def stream_response(response) -> Generator[str, None, None]:
         """스트리밍 응답 생성 (중국어 필터링 포함)"""
-        import re
-        
-        # 중국어 문자 감지 패턴 (한자 범위)
         chinese_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf]')
         
         try:
@@ -483,11 +665,9 @@ class QuestionAnsweringManager:
                         
                         content = choice.delta.content
                         
-                        # <think> 태그 필터링
                         if '<think>' in content:
                             in_think = True
                         
-                        # 중국어 감지 시 스킵
                         if chinese_pattern.search(content):
                             chinese_detected = True
                             continue
@@ -514,7 +694,6 @@ class QuestionAnsweringManager:
             
             logger.info(f'✅ 스트리밍 완료 ({chunk_count}개 청크)')
             
-            # 종료
             yield f"data: {json.dumps({'choices': [{'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
             yield "data: [DONE]\n\n"
             
@@ -526,23 +705,13 @@ class QuestionAnsweringManager:
 # ==================== 초기화 ====================
 
 def wait_for_vllm(max_retries: int = 30, retry_interval: int = 10) -> bool:
-    """
-    vLLM 서버가 준비될 때까지 대기
-    
-    Args:
-        max_retries: 최대 재시도 횟수
-        retry_interval: 재시도 간격 (초)
-    
-    Returns:
-        성공 여부
-    """
+    """vLLM 서버가 준비될 때까지 대기"""
     global vllm_client
     
     logger.info(f'⏳ vLLM 서버 연결 대기 중... (최대 {max_retries * retry_interval}초)')
     
     for attempt in range(1, max_retries + 1):
         try:
-            # vLLM 클라이언트 초기화
             if vllm_client is None:
                 vllm_client = openai.OpenAI(
                     api_key='sk-not-needed',
@@ -550,7 +719,6 @@ def wait_for_vllm(max_retries: int = 30, retry_interval: int = 10) -> bool:
                     timeout=30.0
                 )
             
-            # 모델 목록 조회로 연결 테스트
             models = vllm_client.models.list()
             logger.info(f'✅ vLLM 연결 성공 (시도 {attempt}/{max_retries})')
             return True
@@ -567,9 +735,7 @@ def wait_for_vllm(max_retries: int = 30, retry_interval: int = 10) -> bool:
 
 
 def preload_embedding_service():
-    """
-    임베딩 서비스 사전 로드 (HuggingFace 모델 싱글톤)
-    """
+    """임베딩 서비스 사전 로드"""
     try:
         from utils.embedding_service import get_embedding_service
         logger.info('🔄 임베딩 서비스 사전 로드 중...')
@@ -580,9 +746,7 @@ def preload_embedding_service():
 
 
 def preload_reranker():
-    """
-    Reranker 사전 로드 (GPU 활용)
-    """
+    """Reranker 사전 로드 (GPU 활용)"""
     if not ENABLE_RERANKING:
         logger.info('ℹ️  Reranking 비활성화 - Reranker 로드 스킵')
         return
@@ -605,7 +769,7 @@ async def startup():
     global vector_store, graph_processor, drill_down_retriever, intent_router, vllm_client
     
     logger.info('=' * 70)
-    logger.info('RAG API 시작 중...')
+    logger.info('🚀 RAG API 시작 중... (Production-Ready v2.0)')
     logger.info('=' * 70)
     
     try:
@@ -643,8 +807,8 @@ async def startup():
         logger.info('3️⃣  Intent Router 초기화...')
         if ScalableIntentRouter is not None:
             intent_router = ScalableIntentRouter(
-                active_domains=['notion'],  # 현재 Notion만 활성화
-                use_llm_fallback=False       # 규칙 기반만 사용 (속도 최적화)
+                active_domains=['notion'],
+                use_llm_fallback=False
             )
             logger.info(f'✅ Intent Router 준비: 활성 도메인 = {intent_router.active_domains}')
         else:
@@ -674,18 +838,28 @@ async def startup():
         logger.info(f'✅ {len(models)}개 모델 감지')
         
         logger.info('=' * 70)
-        logger.info('🚀 RAG API 준비 완료!')
+        logger.info('🚀 RAG API 준비 완료! (Production-Ready)')
         logger.info(f'   - Vector Store: ✅ ({stats.get("document_count", 0)}개 문서)')
         logger.info(f'   - Graph: {"✅" if graph else "❌"}')
         logger.info(f'   - Intent Router: {"✅" if intent_router else "❌"}')
         logger.info(f'   - Drill-Down Retriever: {"✅" if drill_down_retriever else "❌"}')
-        logger.info(f'   - Reranking: {"✅" if ENABLE_RERANKING else "❌"} ({RERANKER_MODEL if ENABLE_RERANKING else "N/A"})')
-        logger.info(f'   - vLLM: {"✅" if vllm_ready else "❌ (백그라운드 연결 시도)"}')
+        logger.info(f'   - Reranking: {"✅" if ENABLE_RERANKING else "❌"}')
+        logger.info(f'   - Token Management: ✅ (Max: {MAX_CONTEXT_TOKENS})')
+        logger.info(f'   - ThreadPool: ✅ ({THREAD_POOL_SIZE} workers)')
+        logger.info(f'   - vLLM: {"✅" if vllm_ready else "❌"}')
         logger.info('=' * 70)
         
     except Exception as e:
         logger.error(f'❌ 초기화 실패: {str(e)}', exc_info=True)
         raise
+
+
+@app.on_event('shutdown')
+async def shutdown():
+    """서버 종료 시 리소스 정리"""
+    logger.info('🛑 서버 종료 중...')
+    executor.shutdown(wait=True)
+    logger.info('✅ ThreadPool 정리 완료')
 
 
 # ==================== API 엔드포인트 ====================
@@ -707,16 +881,20 @@ async def health_check() -> Dict:
         
         return {
             'status': 'ok',
+            'version': '2.0.0',
             'timestamp': datetime.now().isoformat(),
             'vector_store': stats,
             'graph': graph_stats,
             'model': MODEL_NAME,
             'documents': stats.get('document_count', 0),
+            'token_limit': MAX_CONTEXT_TOKENS,
+            'thread_pool_size': THREAD_POOL_SIZE,
             'components': {
                 'vector_store': vector_store is not None,
                 'graph': graph_processor is not None,
                 'intent_router': intent_router is not None,
-                'drill_down_retriever': drill_down_retriever is not None
+                'drill_down_retriever': drill_down_retriever is not None,
+                'reranking': ENABLE_RERANKING
             }
         }
     except Exception as e:
@@ -728,44 +906,32 @@ async def health_check() -> Dict:
 async def list_models() -> Dict:
     """모델 목록 반환"""
     logger.info('📊 /v1/models 요청')
-    
     models = ModelManager.get_models()
-    
-    return {
-        'object': 'list',
-        'data': models
-        # "data": [{"id": "DeepSeek-R1-Distill-Qwen-14B", "object": "model"}]
-    }
+    return {'object': 'list', 'data': models}
 
 
 # ==================== 디버그 엔드포인트 ====================
 
 @app.post('/v1/search')
 async def search_documents(query: str, top_k: int = 5) -> Dict:
-    """
-    ✅ [디버그용] 검색 결과 확인 엔드포인트
-    
-    Intent Router + Drill-Down Retriever 동작 확인용
-    """
+    """✅ [비동기] 검색 결과 확인 엔드포인트"""
     logger.info(f'🔍 /v1/search 요청: "{query[:50]}..."')
     
-    result = VectorSearchManager.search_with_intent(query, top_k=top_k)
+    result = await VectorSearchManager.search_with_intent(query, top_k=top_k)
     
     return {
         'query': query,
         'intent': result.get('intent'),
         'search_type': result.get('search_type'),
         'document_count': len(result.get('documents', [])),
-        'documents': result.get('documents', [])[:3],  # 상위 3개만 반환
+        'documents': result.get('documents', [])[:3],
         'context_length': len(result.get('context', ''))
     }
 
 
 @app.post('/v1/intent')
 async def analyze_intent(query: str) -> Dict:
-    """
-    ✅ [디버그용] Intent 분석 엔드포인트
-    """
+    """✅ [디버그용] Intent 분석 엔드포인트"""
     if intent_router is None:
         return {'error': 'Intent Router not initialized'}
     
@@ -774,36 +940,35 @@ async def analyze_intent(query: str) -> Dict:
 
 
 @app.post('/v1/chat/completions')
+@time_logger
 async def chat_completions(request: ChatCompletionRequest) -> Any:
     """
-    Chat Completion 엔드포인트
+    ✅ [Production-Ready] Chat Completion 엔드포인트
     
-    플로우:
-    1. 사용자 질문 추출
-    2. Intent 분류 → Drill-Down 검색
-    3. System Prompt + Context + Query 구성
-    4. vLLM (DeepSeek-R1) 호출
-    5. <think> 태그 필터링
-    6. 응답 반환
+    개선사항:
+    1. Non-blocking I/O (검색, LLM 호출)
+    2. Smart Token Management (동적 히스토리 관리)
+    3. Structured Prompt (System에 Context 주입)
+    4. Observability (time_logger)
     """
     logger.info('=' * 70)
     logger.info(f'💬 Chat: {len(request.messages)}개 메시지, stream={request.stream}')
     logger.info('=' * 70)
     
     try:
-        # 1️⃣  사용자 질문 추출
+        # 1️⃣ 사용자 질문 추출
         user_message = QuestionAnsweringManager.extract_user_message(request.messages)
         if not user_message:
             raise HTTPException(status_code=400, detail="사용자 메시지 없음")
         
         logger.info(f'질문: {user_message[:100]}...')
         
-        # ✅ Open WebUI 내부 Task 요청 감지 (RAG 검색 불필요)
+        # ✅ Open WebUI 내부 Task 요청 감지
         is_internal_task = user_message.strip().startswith('### Task:')
         
-        # ✅ follow-up questions 요청은 완전히 차단
+        # ✅ follow-up questions 요청 차단
         if 'follow-up questions' in user_message.lower() or 'Suggest 3-5 relevant' in user_message:
-            logger.info('🚫 Follow-up questions 요청 차단 → 빈 응답 반환')
+            logger.info('🚫 Follow-up questions 요청 차단')
             return {
                 'id': f'chatcmpl-{datetime.now().timestamp()}',
                 'object': 'chat.completion',
@@ -811,10 +976,7 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
                 'model': MODEL_NAME,
                 'choices': [{
                     'index': 0,
-                    'message': {
-                        'role': 'assistant',
-                        'content': ''
-                    },
+                    'message': {'role': 'assistant', 'content': ''},
                     'finish_reason': 'stop'
                 }],
                 'usage': {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0}
@@ -823,70 +985,41 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
         if is_internal_task:
             # 내부 Task는 RAG 검색 없이 바로 LLM에 전달
             logger.info('🔧 Open WebUI 내부 Task 감지 → RAG 스킵')
-            context = ""
-            final_user_content = user_message
-            
-            # 내부 Task용 간단한 시스템 프롬프트
             vllm_messages = [
-                {'role': 'system', 'content': 'You are a helpful assistant. Respond in the requested format.'}
+                {'role': 'system', 'content': 'You are a helpful assistant. Respond in the requested format.'},
+                {'role': 'user', 'content': user_message}
             ]
         else:
-            # 2️⃣  벡터 DB 검색 (RAG)
-            logger.info('Step 1: RAG 검색...')
-            context = VectorSearchManager.search(user_message, top_k=SEARCH_TOP_K)
+            # 2️⃣ 벡터 DB 검색 (RAG) - Non-blocking
+            logger.info('Step 1: RAG 검색 (Non-blocking)...')
+            context = await VectorSearchManager.search(user_message, top_k=SEARCH_TOP_K)
             logger.info(f'검색 완료: {len(context)}자')
             
-            # 3️⃣  프롬프트 구성
-            logger.info('Step 2: 프롬프트 구성...')
-            final_user_content = f"""다음은 검색된 참고 문서입니다:
-{context}
-
----
-
-사용자 질문:
-{user_message}
-
-위 문서를 참고하여 질문에 답하세요."""
-        
-            # 메시지 재구성 (일반 RAG 질문)
-            vllm_messages = [
-                {'role': 'system', 'content': QuestionAnsweringManager.SYSTEM_PROMPT}
-            ]
-        
-        # ✅ [수정] 토큰 제한을 고려하여 최근 메시지만 포함
-        # 너무 오래된 대화는 제외하여 토큰 절약
-        # 하지만 최근 2-3개는 포함하여 대화의 연결성 유지
-        max_history = 3  # 최근 3개 메시지까지만 포함
-        
-        # 현재 메시지 이전의 모든 메시지 중 최근 max_history개만 선택
-        # (내부 Task는 히스토리 포함하지 않음)
-        if not is_internal_task:
-            history_messages = request.messages[:-1]  # 현재 메시지 제외
-            if len(history_messages) > max_history:
-                history_messages = history_messages[-max_history:]  # 최근 max_history개만
+            # 3️⃣ Smart Token Management + Structured Prompt
+            logger.info('Step 2: 토큰 관리 & 프롬프트 구성...')
             
-            # 선택된 과거 메시지 추가
-            for msg in history_messages:
-                if msg.role in ['user', 'assistant']:
-                    vllm_messages.append({'role': msg.role, 'content': msg.content})
+            # 현재 메시지 이전의 히스토리 추출
+            history = [msg for msg in request.messages[:-1] if msg.role in ['user', 'assistant']]
             
-            logger.info(f'메시지: System + History({len(history_messages)}) + Current = {len(vllm_messages)+1}개')
-        else:
-            logger.info(f'메시지: Internal Task (히스토리 없음)')
+            # ✅ TokenManager를 사용한 동적 컨텍스트 윈도우 관리
+            vllm_messages = TokenManager.manage_context_window(
+                system_prompt=QuestionAnsweringManager.SYSTEM_PROMPT,
+                context=context,
+                current_query=user_message,
+                history=history,
+                max_tokens=MAX_CONTEXT_TOKENS
+            )
         
-        # 최종 사용자 메시지 추가 (검색된 컨텍스트 포함)
-        vllm_messages.append({'role': 'user', 'content': final_user_content})
-        
-        # 4️⃣  LLM 호출
-        logger.info('Step 3: LLM 호출...')
-        response = QuestionAnsweringManager.call_llm(
+        # 4️⃣ LLM 호출 - Non-blocking
+        logger.info('Step 3: LLM 호출 (Non-blocking)...')
+        response = await QuestionAnsweringManager.call_llm_async(
             messages=vllm_messages,
             temperature=request.temperature,
             max_tokens=request.max_tokens,
             stream=request.stream
         )
         
-        # 5️⃣  응답 반환
+        # 5️⃣ 응답 반환
         if request.stream:
             logger.info('스트리밍 응답 반환')
             return StreamingResponse(
@@ -904,11 +1037,7 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
                 raise HTTPException(status_code=500, detail='vLLM 응답 오류')
             
             assistant_message = response.choices[0].message.content
-            
-            # <think> 태그 제거
-            think, clean_message = QuestionAnsweringManager.extract_think_content(
-                assistant_message
-            )
+            think, clean_message = QuestionAnsweringManager.extract_think_content(assistant_message)
             
             logger.info(f'✅ 응답: {clean_message[:100]}...')
             
@@ -919,10 +1048,7 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
                 'model': MODEL_NAME,
                 'choices': [{
                     'index': 0,
-                    'message': {
-                        'role': 'assistant',
-                        'content': clean_message
-                    },
+                    'message': {'role': 'assistant', 'content': clean_message},
                     'finish_reason': 'stop'
                 }],
                 'usage': {

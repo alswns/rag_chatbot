@@ -15,7 +15,7 @@ cd "$PROJECT_DIR"
 # 최신 코드 자동 pull
 if [ -d .git ]; then
     echo -e "${YELLOW}[0/4] git pull로 최신 코드 동기화...${NC}"
-    git pull --rebase --autostash || true
+    git pull origin main --rebase --autostash || true
 fi
 
 # 색상 정의

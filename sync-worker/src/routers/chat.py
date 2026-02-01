@@ -92,9 +92,9 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
                 history_for_web = [msg for msg in request.messages[:-1] if msg.role in ['user', 'assistant']]
                 history_context = [{'role': msg.role, 'content': msg.content} for msg in history_for_web[-6:]]
                 
-                # 웹 검색 수행 (재작성된 쿼리 사용)
+                # 웹 검색 수행
                 web_context = await web_service.search_if_needed(
-                    user_query=search_query,  # 재작성된 쿼리
+                    user_query=user_message,
                     internal_context=context,
                     force_search=force_web_search,
                     history=history_context
@@ -108,11 +108,11 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
             except Exception as e:
                 logger.error(f'❌ 웹 검색 실패: {str(e)}')
             
-            # Intent 분류 (재작성된 쿼리 사용)
+            # Intent 분류
             detected_intent = 'explanation'
             if deps.semantic_router:
                 try:
-                    detected_intent, confidence = deps.semantic_router.classify(search_query)
+                    detected_intent, confidence = deps.semantic_router.classify(user_message)
                     logger.info(f'🎯 Intent: {detected_intent} (confidence={confidence:.2f})')
                 except Exception as e:
                     logger.warning(f'⚠️ Intent 분류 실패: {str(e)}')

@@ -1,8 +1,9 @@
 """Vector search service with RAG integration"""
 import logging
+import asyncio
 from typing import List, Dict, Any
 from core.config import SEARCH_TOP_K, ENABLE_RERANKING, RERANKER_TOP_K
-from core.dependencies import vector_store, drill_down_retriever, intent_router, executor
+import core.dependencies as deps
 
 logger = logging.getLogger(__name__)
 
@@ -15,14 +16,14 @@ class VectorSearchManager:
     @staticmethod
     def _search_sync(query: str, top_k: int = SEARCH_TOP_K) -> str:
         """동기 검색 로직"""
-        if vector_store is None:
+        if deps.vector_store is None:
             logger.warning('❌ Vector Store 미초기화')
             return ""
         
         try:
             # Intent 분류
-            if intent_router is not None:
-                intent_result = intent_router.route(query)
+            if deps.intent_router is not None:
+                intent_result = deps.intent_router.route(query)
                 logger.info(f'🎯 Intent: {intent_result.intent} | Domain: {intent_result.domain}')
                 
                 if intent_result.intent == 'chat':
@@ -30,12 +31,12 @@ class VectorSearchManager:
                     return ""
             
             # Drill-Down 검색
-            if drill_down_retriever is not None:
+            if deps.drill_down_retriever is not None:
                 logger.info(f'🔍 드릴다운 검색 시작: "{query[:50]}..."')
                 
                 search_k = RERANKER_TOP_K if ENABLE_RERANKING else top_k
                 
-                documents = drill_down_retriever.retrieve(
+                documents = deps.drill_down_retriever.retrieve(
                     query=query,
                     k=search_k,
                     use_reranking=ENABLE_RERANKING
@@ -53,7 +54,7 @@ class VectorSearchManager:
                         } for doc in documents
                     ]
                     
-                    context_xml = drill_down_retriever._format_as_xml(documents)
+                    context_xml = deps.drill_down_retriever._format_as_xml(documents)
                     logger.info(f'✅ 드릴다운 검색 완료: {len(documents)}개 문서')
                     return context_xml
                 else:
@@ -62,7 +63,7 @@ class VectorSearchManager:
             # Fallback 검색
             logger.info(f'🔍 Fallback 검색: "{query[:50]}..."')
             
-            context = vector_store.retrieve_context(
+            context = deps.vector_store.retrieve_context(
                 query, 
                 top_k=top_k, 
                 use_hybrid=True,
@@ -85,11 +86,8 @@ class VectorSearchManager:
         """비동기 검색"""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
-            executor,
+            deps.executor,
             VectorSearchManager._search_sync,
             query,
             top_k
         )
-
-
-import asyncio

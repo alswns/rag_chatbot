@@ -5,7 +5,7 @@ from typing import Dict
 import logging
 
 from managers.model_manager import ModelManager
-from core.dependencies import vector_store, graph_processor, intent_router, drill_down_retriever, semantic_router
+import core.dependencies as deps
 from core.config import ENABLE_RERANKING
 
 logger = logging.getLogger(__name__)
@@ -16,15 +16,15 @@ router = APIRouter()
 async def health_check() -> Dict:
     """헬스 체크"""
     try:
-        if vector_store is None:
+        if deps.vector_store is None:
             return {'status': 'unhealthy', 'error': 'Vector store not initialized'}
         
-        stats = vector_store.get_collection_stats()
+        stats = deps.vector_store.get_collection_stats()
         graph_stats = None
-        if graph_processor:
+        if deps.graph_processor:
             graph_stats = {
-                'nodes': graph_processor.graph.number_of_nodes(),
-                'edges': graph_processor.graph.number_of_edges()
+                'nodes': deps.graph_processor.graph.number_of_nodes(),
+                'edges': deps.graph_processor.graph.number_of_edges()
             }
         
         return {
@@ -34,11 +34,11 @@ async def health_check() -> Dict:
             'vector_store': stats,
             'graph': graph_stats,
             'components': {
-                'vector_store': vector_store is not None,
-                'graph': graph_processor is not None,
-                'intent_router': intent_router is not None,
-                'drill_down_retriever': drill_down_retriever is not None,
-                'semantic_router': semantic_router is not None,
+                'vector_store': deps.vector_store is not None,
+                'graph': deps.graph_processor is not None,
+                'intent_router': deps.intent_router is not None,
+                'drill_down_retriever': deps.drill_down_retriever is not None,
+                'semantic_router': deps.semantic_router is not None,
                 'reranking': ENABLE_RERANKING
             }
         }

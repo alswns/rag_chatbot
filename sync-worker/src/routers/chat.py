@@ -10,7 +10,7 @@ from managers.token_manager import TokenManager, ChatMessage
 from managers.qa_manager import QuestionAnsweringManager
 from services.search_service import VectorSearchManager
 from core.config import MAX_CONTEXT_TOKENS, MAX_MODEL_LEN, MODEL_NAME
-from core.dependencies import semantic_router
+import core.dependencies as deps
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -89,9 +89,9 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
             
             # Intent 분류
             detected_intent = 'explanation'
-            if semantic_router:
+            if deps.semantic_router:
                 try:
-                    detected_intent, confidence = semantic_router.classify(user_message)
+                    detected_intent, confidence = deps.semantic_router.classify(user_message)
                     logger.info(f'🎯 Intent: {detected_intent} (confidence={confidence:.2f})')
                 except Exception as e:
                     logger.warning(f'⚠️ Intent 분류 실패: {str(e)}')

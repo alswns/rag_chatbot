@@ -4,7 +4,7 @@ from typing import Dict
 import logging
 
 from services.search_service import VectorSearchManager
-from core.dependencies import intent_router
+import core.dependencies as deps
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -29,8 +29,8 @@ async def search_documents(query: str, top_k: int = 5) -> Dict:
 @router.post('/v1/intent')
 async def analyze_intent(query: str) -> Dict:
     """Intent 분석 엔드포인트"""
-    if intent_router is None:
+    if deps.intent_router is None:
         raise HTTPException(status_code=503, detail='Intent Router 미초기화')
     
-    result = intent_router.route(query)
+    result = deps.intent_router.route(query)
     return result.to_dict()

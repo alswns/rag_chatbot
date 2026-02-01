@@ -195,24 +195,28 @@ class TokenManager:
     @staticmethod
     def estimate_tokens(text: str) -> int:
         """
-        토큰 수 추정 (근사치)
-        - 한글: ~1.5 chars/token
-        - 영어/숫자: ~4 chars/token (OpenAI 기준)
-        - 혼합 텍스트 평균: ~2 chars/token
+        토큰 수 추정 (개선된 정확도)
+        - 한글: ~1.2 chars/token (더 정확한 추정)
+        - 영어/숫자: ~3.5 chars/token (vLLM 기준)
+        - 특수문자/공백: ~1.5 chars/token
         """
         if not text:
             return 0
         
-        # 한글 문자 수
+        # 한글, 영어, 특수문자 구분
         korean_chars = len(re.findall(r'[가-힣]', text))
-        # 영어/숫자/특수문자
-        other_chars = len(text) - korean_chars
+        english_chars = len(re.findall(r'[a-zA-Z0-9]', text))
+        other_chars = len(text) - korean_chars - english_chars
         
-        # 한글은 1.5 char/token, 영어는 4 char/token
-        korean_tokens = korean_chars / 1.5
-        other_tokens = other_chars / 4
+        # 더 정확한 토큰 추정
+        korean_tokens = korean_chars / 1.2
+        english_tokens = english_chars / 3.5
+        other_tokens = other_chars / 1.5
         
-        return int(korean_tokens + other_tokens)
+        total = int(korean_tokens + english_tokens + other_tokens)
+        
+        # 최소값 보장 (매우 짧은 텍스트)
+        return max(total, len(text.split()) if text.strip() else 0)
     
     @staticmethod
     def estimate_messages_tokens(messages: List[Dict[str, str]]) -> int:
@@ -997,10 +1001,28 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
         
         # 4️⃣ LLM 호출 - Non-blocking
         logger.info('Step 3: LLM 호출 (Non-blocking)...')
+        
+        # ✅ 동적 max_tokens 계산 (토큰 오버플로우 방지)
+        estimated_input_tokens = TokenManager.estimate_messages_tokens(vllm_messages)
+        available_output_tokens = MAX_MODEL_LEN - estimated_input_tokens - 100  # 100토큰 여유
+        
+        # max_tokens를 사용 가능한 범위로 제한
+        dynamic_max_tokens = min(
+            request.max_tokens or 2048,
+            available_output_tokens,
+            1024  # 최대 1024토큰으로 제한 (안전장치)
+        )
+        
+        if dynamic_max_tokens < 50:
+            logger.warning(f'⚠️ 출력 토큰 부족: 입력 {estimated_input_tokens}, 사용가능 {available_output_tokens}')
+            dynamic_max_tokens = 50  # 최소 50토큰 보장
+        
+        logger.info(f'📊 토큰 계산: 입력 ~{estimated_input_tokens}, 출력 {dynamic_max_tokens} (한도 {MAX_MODEL_LEN})')
+        
         response = await QuestionAnsweringManager.call_llm_async(
             messages=vllm_messages,
             temperature=request.temperature,
-            max_tokens=request.max_tokens,
+            max_tokens=dynamic_max_tokens,
             stream=request.stream
         )
         

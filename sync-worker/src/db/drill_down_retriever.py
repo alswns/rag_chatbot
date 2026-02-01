@@ -12,6 +12,7 @@ GraphDrillDownRetriever - 3단계 드릴다운 검색 클래스
 - 3단계 필터링으로 정밀도 향상
 """
 
+import os
 import logging
 from typing import List, Dict, Any, Optional, Set, Tuple
 from dataclasses import dataclass
@@ -348,7 +349,12 @@ class GraphDrillDownRetriever:
             query_embedding = self.vector_store.embedding_service.encode([query])[0].tolist()
             
             # 범위 내 검색 (ChromaDB $in 필터)
-            search_k = min(k * 4, len(allowed_doc_ids), 50)
+            # ✅ RERANKER_TOP_K 환경변수 활용
+            reranker_top_k = int(os.getenv('RERANKER_TOP_K', '50'))
+            if use_reranking:
+                search_k = min(reranker_top_k, len(allowed_doc_ids))
+            else:
+                search_k = min(k * 4, len(allowed_doc_ids), 50)
             
             try:
                 # 청크 ID로 직접 필터링 시도
@@ -495,10 +501,14 @@ class GraphDrillDownRetriever:
         logger.info('[Fallback] 전역 검색 수행')
         
         try:
+            # ✅ RERANKER_TOP_K 환경변수 활용
+            reranker_top_k = int(os.getenv('RERANKER_TOP_K', '50'))
+            search_top_k = reranker_top_k if use_reranking else k
+            
             # 기존 vector_store의 search 메서드 활용
             results = self.vector_store.search(
                 query=query,
-                top_k=k,
+                top_k=search_top_k,
                 use_hybrid=True,
                 use_graph=True,
                 use_reranking=use_reranking

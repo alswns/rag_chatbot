@@ -108,7 +108,7 @@ class SearchDecisionMaker:
             )
         return self.client
     
-    def _summarize_internal_results(self, documents: List[Dict[str, Any]], max_docs: int = 3) -> str:
+    def _summarize_internal_results(self, documents: List[Dict[str, Any]], max_docs: int = 3) -> tuple[str, float]:
         """
         내부 검색 결과 요약 (보안 고려)
         
@@ -117,20 +117,24 @@ class SearchDecisionMaker:
             max_docs: 요약할 최대 문서 수
         
         Returns:
-            요약 텍스트 (또는 "검색 결과 없음")
+            (요약 텍스트, 평균 유사도)
         """
         if not documents:
-            return "검색 결과 없음 - 내부 문서에서 관련 정보를 찾지 못했습니다."
+            return "검색 결과 없음 - 내부 문서에서 관련 정보를 찾지 못했습니다.", 0.0
         
         summaries = []
+        total_score = 0.0
+        
         for i, doc in enumerate(documents[:max_docs], 1):
             title = doc.get('metadata', {}).get('title', 'Untitled')
             content_preview = doc.get('content', '')[:200]  # 처음 200자만
             score = doc.get('score', 0.0)
+            total_score += score
             
             summaries.append(f"[문서 {i}] 제목: {title}, 유사도: {score:.2f}, 내용 일부: {content_preview}...")
         
-        return '\n'.join(summaries)
+        avg_score = total_score / min(len(documents), max_docs)
+        return '\n'.join(summaries), avg_score
     
     async def sanitize_query(self, user_query: str) -> str:
         """
@@ -196,12 +200,24 @@ class SearchDecisionMaker:
                 return await self.sanitize_query(user_query)
             
             # 내부 검색 결과 요약
-            internal_summary = self._summarize_internal_results(internal_documents)
+            internal_summary, avg_similarity = self._summarize_internal_results(internal_documents)
             
-            # 프롬프트 구성
+            # ✅ 유사도 기반 추가 판단
+            if avg_similarity > 0 and avg_similarity < 0.6:
+                logger.info(f'🚨 평균 유사도 낙점 ({avg_similarity:.2f} < 0.6) → 강제 검색')
+                return await self.sanitize_query(user_query)
+            
+            # 프롬프트 구성 (유사도 정보 포함)
+            enhanced_summary = f"""평균 유사도: {avg_similarity:.2f}
+
+{internal_summary}
+
+⚠️ 중요: 유사도가 0.7 미만이면 문서가 있어도 관련성이 낮은 것입니다.
+문서에 질문에 대한 **구체적인 답**이 없다면 웹 검색이 필요합니다."""
+            
             prompt = self.DECISION_PROMPT.format(
                 user_query=user_query,
-                internal_summary=internal_summary
+                internal_summary=enhanced_summary
             )
             
             # LLM 호출 (빠른 판단)

@@ -106,7 +106,7 @@ services:
       - LLM_BACKEND=vllm
       - VLLM_API_URL=http://vllm:8000/v1
       - LLM_MODEL_ID=DeepSeek-R1-Distill-8B
-
+      - MAX_MODEL_LEN=${MAX_MODEL_LEN:-16384}
       # ChromaDB
       - CHROMA_HOST=chromadb
       - CHROMA_PORT=8000

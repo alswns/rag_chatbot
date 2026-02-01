@@ -61,6 +61,11 @@ class EmbeddingService:
         if self._model is None:
             raise RuntimeError('임베딩 모델이 로드되지 않았습니다')
         return self._model
+    
+    @property
+    def model_name(self) -> str:
+        """모델 이름 반환"""
+        return self._model_name
 
 
 # 싱글톤 인스턴스

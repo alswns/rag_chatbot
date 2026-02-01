@@ -37,7 +37,8 @@ def preload_embedding_service():
         from utils.embedding_service import get_embedding_service
         logger.info('🔄 임베딩 서비스 사전 로드 중...')
         embedding_service = get_embedding_service()
-        logger.info(f'✅ 임베딩 서비스 로드 완료: {embedding_service.model_name}')
+        model_name = getattr(embedding_service, 'model_name', 'BAAI/bge-m3')
+        logger.info(f'✅ 임베딩 서비스 로드 완료: {model_name}')
     except Exception as e:
         logger.warning(f'⚠️ 임베딩 서비스 사전 로드 실패: {str(e)}')
 
@@ -98,7 +99,7 @@ async def initialize_app():
     # Intent Router 초기화
     logger.info('3️⃣  Intent Router 초기화...')
     if get_intent_router:
-        deps.intent_router = get_intent_router(active_domains=['notion'], use_llm_fallback=False)
+        deps.intent_router = get_intent_router(active_domains=['notion'])
         logger.info('✅ Intent Router 준비')
     
     # Drill-Down Retriever 초기화

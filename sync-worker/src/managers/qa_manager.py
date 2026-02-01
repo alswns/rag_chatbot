@@ -28,7 +28,34 @@ class QuestionAnsweringManager:
 
 ## 3. 답변 스타일
 - **두괄식:** 결론이나 핵심 해결책을 먼저 제시하고, 그 뒤에 상세 설명이나 근거를 덧붙입니다.
-- **구조화:** 긴 설명이 필요할 경우 번호 매기기나 불렛 포인트를 사용합니다."""
+- **구조화:** 긴 설명이 필요할 경우 번호 매기기나 불렛 포인트를 사용합니다.
+
+## 4. 📚 출처 명시 규칙 (MANDATORY)
+**답변의 마지막에 반드시 다음 형식으로 참고한 출처를 명시하세요:**
+
+### 출처 형식:
+```
+---
+📌 **참고 출처:**
+- [출처 유형] 문서명 또는 URL
+```
+
+### 출처 유형 분류:
+- **[Notion]**: Notion 문서 (문서 제목 명시)
+- **[GitHub]**: GitHub 저장소/파일 (저장소명/파일명)
+- **[웹 검색]**: DuckDuckGo 검색 결과 (URL)
+- **[내부 문서]**: 기타 내부 데이터베이스 문서
+
+### 예시:
+```
+---
+📌 **참고 출처:**
+- [Notion] FastAPI 프로젝트 가이드
+- [GitHub] alswns/rag_chatbot - sync-worker/src/main.py
+- [웹 검색] https://fastapi.tiangolo.com/tutorial/
+```
+
+**중요:** Context가 여러 출처에서 온 경우 모두 나열하세요."""
     
     INTENT_INSTRUCTIONS = {
         'coding': """

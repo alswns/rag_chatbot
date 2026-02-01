@@ -61,9 +61,9 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
                 {'role': 'user', 'content': user_message}
             ]
         else:
-            # RAG 검색 (재작성된 쿼리 사용)
+            # RAG 검색
             logger.info('Step 1: RAG 검색...')
-            context = await VectorSearchManager.search(search_query)
+            context = await VectorSearchManager.search(user_message)
             logger.info(f'검색 완료: {len(context)}자')
             
             # 조건부 웹 검색

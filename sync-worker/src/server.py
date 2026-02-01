@@ -124,7 +124,7 @@ OLLAMA_API_URL = os.getenv('OLLAMA_API_URL', 'http://localhost:11434')
 CHROMA_HOST = os.getenv('CHROMA_HOST', 'localhost')
 CHROMA_PORT = int(os.getenv('CHROMA_PORT', '8000'))
 GRAPH_PERSIST_PATH = os.getenv('GRAPH_PERSIST_PATH', './data/graph.pkl')
-SEARCH_TOP_K = int(os.getenv('SEARCH_TOP_K', '2'))
+SEARCH_TOP_K = int(os.getenv('SEARCH_TOP_K', '50'))
 
 # ✅ Reranking 설정
 ENABLE_RERANKING = os.getenv('ENABLE_RERANKING', 'true').lower() == 'true'

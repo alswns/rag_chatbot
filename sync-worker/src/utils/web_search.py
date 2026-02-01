@@ -10,18 +10,12 @@
 import os
 import re
 import logging
+import asyncio
+import requests
 from typing import List, Dict, Any, Optional
 import openai
 
 logger = logging.getLogger(__name__)
-
-# DuckDuckGo 라이브러리 임포트
-try:
-    from duckduckgo_search import DDGS  # ✅ AsyncDDGS 대신 동기 버전 사용
-    import asyncio
-except ImportError:
-    DDGS = None
-    logger.warning('⚠️ duckduckgo-search 미설치 - 웹 검색 비활성화')
 
 
 # ==================== 1. Binary Decision Maker ====================
@@ -276,11 +270,21 @@ class QueryGenerator:
 # ==================== 3. DuckDuckGo Searcher ====================
 
 class DuckDuckGoSearcher:
-    """DuckDuckGo 웹 검색 실행"""
+    """DuckDuckGo 웹 검색 실행 (requests 직접 사용)"""
+    
+    # DuckDuckGo HTML API 엔드포인트
+    SEARCH_URL = "https://html.duckduckgo.com/html/"
+    
+    def __init__(self):
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+        }
     
     def _search_sync(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
         """
-        동기 DuckDuckGo 검색 수행 (내부 메서드)
+        동기 DuckDuckGo 검색 수행 (requests + HTML 파싱)
         
         Args:
             query: 검색어
@@ -289,33 +293,77 @@ class DuckDuckGoSearcher:
         Returns:
             [{'title': ..., 'body': ..., 'href': ...}, ...]
         """
-        if DDGS is None:
-            logger.error('❌ duckduckgo-search 미설치')
-            return []
-        
         try:
-            # ✅ Fix: context manager 제거, 직접 호출
-            ddgs = DDGS()
-            search_results = ddgs.text(query, max_results=max_results)
+            # DuckDuckGo HTML API 호출
+            response = requests.post(
+                self.SEARCH_URL,
+                data={'q': query, 'b': ''},
+                headers=self.headers,
+                timeout=10
+            )
+            response.raise_for_status()
             
+            # 간단한 HTML 파싱 (정규식 사용)
+            html = response.text
             results = []
-            # DDGS.text()는 제너레이터를 반환
-            count = 0
-            for result in search_results:
-                results.append({
-                    'title': result.get('title', ''),
-                    'body': result.get('body', ''),
-                    'href': result.get('href', '')
-                })
-                count += 1
-                if count >= max_results:
-                    break
             
+            # 결과 블록 추출 패턴
+            result_pattern = re.compile(
+                r'<a rel="nofollow" class="result__a" href="([^"]+)"[^>]*>([^<]+)</a>.*?'
+                r'<a class="result__snippet"[^>]*>([^<]*(?:<[^>]+>[^<]*)*)</a>',
+                re.DOTALL
+            )
+            
+            # 더 간단한 패턴 (백업)
+            simple_pattern = re.compile(
+                r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([^<]+)</a>',
+                re.DOTALL
+            )
+            
+            # 결과 추출
+            matches = result_pattern.findall(html)
+            
+            if not matches:
+                # 백업 패턴 사용
+                matches = simple_pattern.findall(html)
+                for href, title in matches[:max_results]:
+                    # URL 디코딩
+                    if href.startswith('//duckduckgo.com/l/?uddg='):
+                        import urllib.parse
+                        href = urllib.parse.unquote(href.split('uddg=')[1].split('&')[0])
+                    
+                    results.append({
+                        'title': title.strip(),
+                        'body': '',
+                        'href': href
+                    })
+            else:
+                for href, title, snippet in matches[:max_results]:
+                    # HTML 태그 제거
+                    snippet_clean = re.sub(r'<[^>]+>', '', snippet).strip()
+                    
+                    # URL 디코딩
+                    if href.startswith('//duckduckgo.com/l/?uddg='):
+                        import urllib.parse
+                        href = urllib.parse.unquote(href.split('uddg=')[1].split('&')[0])
+                    
+                    results.append({
+                        'title': title.strip(),
+                        'body': snippet_clean,
+                        'href': href
+                    })
+            
+            logger.debug(f'DuckDuckGo HTML 파싱 완료: {len(results)}개 결과')
             return results
                 
+        except requests.exceptions.Timeout:
+            logger.error('❌ DuckDuckGo 검색 타임아웃')
+            return []
+        except requests.exceptions.RequestException as e:
+            logger.error(f'❌ DuckDuckGo 요청 실패: {str(e)}')
+            return []
         except Exception as e:
             logger.error(f'❌ DuckDuckGo 검색 실패: {str(e)}')
-            logger.debug(f'검색 쿼리: "{query}", max_results: {max_results}', exc_info=True)
             return []
     
     async def search(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:

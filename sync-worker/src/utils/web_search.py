@@ -130,20 +130,22 @@ class QueryGenerator:
 2. **일반적인 기술 용어**만 사용
 3. **프로젝트명, 파일명, 변수명, IP 주소 제거**
 4. 설명이나 접두어 없이 **오직 키워드만** 출력
+5. **마크다운 코드 블록(```) 사용 금지** - 순수 텍스트만 출력
+6. **site: 연산자 사용 금지** - 자연어 키워드만 사용
 
 ## ✨ Reference Resolution (지시어 해결)
-사용자의 질문에 **'이 링크', '그 사이트', '아까 말한 것', '거기'** 같은 지시어가 있다면:
+사용자의 질문에 **'이 링크', '그 사이트', '아까 말한 것', '거기', '해당'** 같은 지시어가 있다면:
 1. [대화 히스토리]를 참고하여 **정확한 대상(Entity) 이름이나 URL**을 찾으세요.
-2. 찾아낸 대상을 포함하여 검색 키워드로 변환하세요.
+2. 찾아낸 대상을 **자연어 검색 키워드**로 변환하세요.
 
 **예시:**
-- 히스토리: "박민준의 깃허브는 https://github.com/park 입니다."
-- 사용자: "거기 있는 프로젝트 알려줘"
-- 출력: `site:github.com/park repositories` 또는 `Park Min-jun GitHub projects`
+- 히스토리: "박민준의 깃허브는 https://github.com/psss36786 입니다."
+- 사용자: "해당 깃허브에는 어떤 레포지토리가 있어?"
+- 출력: psss36786 github repositories
 
 - 히스토리: "선린인터넷고등학교에 대해 설명해줬."
 - 사용자: "그 학교 입학 요건은?"
-- 출력: `Sunrin Internet High School admission requirements`
+- 출력: Sunrin Internet High School admission requirements
 
 ## 일반 예시
 - 입력: "우리 프로젝트의 FastAPI 비동기 처리 방법"
@@ -157,7 +159,7 @@ class QueryGenerator:
 ## 사용자 질문
 {query}
 
-## 검색 키워드:"""
+## 검색 키워드 (코드 블록 없이 순수 텍스트만):"""
 
     def __init__(self, vllm_api_url: str = None):
         self.vllm_api_url = vllm_api_url or os.getenv('VLLM_API_URL', 'http://localhost:8000/v1')
@@ -177,10 +179,13 @@ class QueryGenerator:
         # 1. 마크다운 코드 블록 제거
         cleaned = re.sub(r'```[a-z]*\n?', '', raw_query)
         
-        # 2. 인용부호 제거
+        # 2. 백틱(`) 제거
+        cleaned = cleaned.replace('`', '').strip()
+        
+        # 3. 인용부호 제거
         cleaned = cleaned.replace('"', '').replace("'", '').strip()
         
-        # 3. 접두어 제거 (다국어)
+        # 4. 접두어 제거 (다국어)
         prefixes = [
             '검색 키워드:', '검색어:', 'search query:', 'query:', 
             'keywords:', '영어 검색어:', '세탁된 검색어:'
@@ -189,10 +194,10 @@ class QueryGenerator:
             if cleaned.lower().startswith(prefix.lower()):
                 cleaned = cleaned[len(prefix):].strip()
         
-        # 4. 첫 줄만 추출
+        # 5. 첫 줄만 추출
         cleaned = cleaned.split('\n')[0].strip()
         
-        # 5. 최대 길이 제한 (10 단어)
+        # 6. 최대 길이 제한 (10 단어)
         words = cleaned.split()
         if len(words) > 10:
             cleaned = ' '.join(words[:10])

@@ -391,6 +391,11 @@ class HierarchicalAgent:
         # === Step 3: Execute Tasks ===
         needs_permission_request = False
         
+        # thinking_stream 헬퍼 함수 정의
+        async def stream_thinking(content):
+            yield {"type": "thinking", "content": content}
+            await asyncio.sleep(0.05)
+        
         for task in context.plan:
             task.status = "running"
             yield {"type": "thinking", "content": f"🔧 **작업 {task.id}**: {task.task}\n"}
@@ -403,7 +408,7 @@ class HierarchicalAgent:
                 internal_search_fn=internal_search_fn,
                 web_search_fn=web_search_fn,
                 has_search_permission=has_search_permission,
-                thinking_stream=self._create_thinking_yielder(yield)
+                thinking_stream=stream_thinking
             )
             
             # 검색 허용 요청이 필요한지 체크
@@ -446,13 +451,6 @@ class HierarchicalAgent:
         search_keywords = ['검색', '찾아', '구글', 'google', '검색해서', '찾아줘', '알아봐']
         query_lower = query.lower()
         return any(keyword in query_lower for keyword in search_keywords)
-    
-    def _create_thinking_yielder(self, parent_yield):
-        """Worker용 실시간 thinking yielder 생성"""
-        async def thinking_yielder(content):
-            await parent_yield({"type": "thinking", "content": content})
-            await asyncio.sleep(0.05)
-        return thinking_yielder
     
     async def run_simple(
         self,

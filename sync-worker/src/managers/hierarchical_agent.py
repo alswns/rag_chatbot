@@ -42,46 +42,57 @@ class ManagerAgent:
     복잡한 질문을 해결 가능한 하위 작업 리스트로 분해
     """
     
-    SYSTEM_PROMPT = """당신은 **프로젝트 매니저**입니다.
+    SYSTEM_PROMPT = """당신은 **수석 전략가**입니다.
 
-## 역할
-사용자의 복잡한 질문을 해결하기 위해 필요한 **정보 수집 단계**를 계획하세요.
+## 🗺️ 내부 데이터 지도 (Context Map)
+- **Notion:** 박민준의 이력서, 개인 공부(Python, ROS2, ML), 일기, 프로젝트 기획안(핸드트래킹 글러브 등)
+- **Git:** ROS 2 C++ 소스코드, YOLOv11 포즈 트레이닝 스크립트, FastAPI 서버 코드
+- **구조:** 모든 문서는 'Hub(상위 주제)'와 'Leaf(상세 내용)'로 연결된 계층 구조
 
-## 규칙
-1. 각 단계는 **하나의 명확한 정보 수집 목표**여야 합니다.
-2. 순차적 의존성이 있는 경우 `depends_on` 필드로 표시하세요.
-3. 단순한 질문은 1개의 작업으로 충분합니다.
-4. 최대 5개의 하위 작업까지만 생성하세요.
+## 📋 Planning Rules (필수)
+1. **Explore First:** 첫 번째 작업은 반드시 `내부 인덱스 확인`이어야 합니다.
+   - 검색어 형식: `박민준 [주제] 개요` 또는 `[주제] 목록`
+   
+2. **Specific Queries:** 구체적인 검색어를 사용하세요.
+   - ❌ 나쁜 예: "박민준 공부"
+   - ✅ 좋은 예: "박민준 Notion 내 파이썬 학습 리스트 및 ROS2 실습 기록"
+   
+3. **Internal Priority:** 내부 데이터에서 힌트를 얻어 다음 작업을 구체화하세요.
+   - 예: 1번에서 'IMU 센서' 발견 → 2번을 'Git에서 IMU 처리 코드 찾기'로 설정
+
+4. **2-Step Minimum:** 복합 질문은 최소 2단계로 분해하세요.
+   - 1단계: 내부 인덱스 탐색 (Hub 레벨)
+   - 2단계: 구체적 정보 검색 (Leaf 레벨)
 
 ## 예시
 
-### 예시 1: 복합 질문
+### 예시 1: 복합 질문 (외부 정보 필요)
 **질문:** "박민준의 대학과 그 대학 총장을 알려줘"
 **계획:**
 ```json
 [
-  {"id": 1, "task": "박민준의 출신 대학교 확인", "depends_on": null},
-  {"id": 2, "task": "1번에서 확인된 대학교의 현재 총장 확인", "depends_on": 1}
+  {"id": 1, "task": "박민준 프로필에서 출신 대학교 확인 (Notion 이력서 탐색)", "depends_on": null},
+  {"id": 2, "task": "1번에서 확인된 대학교의 현재 총장 정보 검색", "depends_on": 1}
 ]
 ```
 
-### 예시 2: 단순 질문
-**질문:** "FastAPI 비동기 처리 방법 알려줘"
+### 예시 2: 내부 데이터 질문
+**질문:** "박민준이 뭘 공부했어?"
 **계획:**
 ```json
 [
-  {"id": 1, "task": "FastAPI 비동기 처리 방법 검색", "depends_on": null}
+  {"id": 1, "task": "박민준 Notion 내 학습 기록 인덱스 확인 (Python, ROS2, ML 등)", "depends_on": null},
+  {"id": 2, "task": "1번에서 발견된 주요 학습 주제별 상세 내용 수집", "depends_on": 1}
 ]
 ```
 
-### 예시 3: 비교 질문
-**질문:** "선린인터넷고와 한성과학고 비교해줘"
+### 예시 3: 기술 질문
+**질문:** "박민준의 ROS2 프로젝트 알려줘"
 **계획:**
 ```json
 [
-  {"id": 1, "task": "선린인터넷고등학교 정보 수집", "depends_on": null},
-  {"id": 2, "task": "한성과학고등학교 정보 수집", "depends_on": null},
-  {"id": 3, "task": "두 학교 비교 분석", "depends_on": 2}
+  {"id": 1, "task": "Git 저장소에서 ROS2 관련 프로젝트 목록 확인", "depends_on": null},
+  {"id": 2, "task": "1번에서 발견된 ROS2 프로젝트의 핵심 기능 및 코드 구조 분석", "depends_on": 1}
 ]
 ```
 
@@ -170,19 +181,27 @@ class WorkerAgent:
     """
     
     # Note: {{, }}로 escape하여 .format()과 충돌 방지
-    SYSTEM_PROMPT = """당신은 **현장 요원**입니다.
+    SYSTEM_PROMPT = """당신은 **정보 수집 전문가**입니다.
 
-## 역할
-주어진 'Task'를 해결하기 위해 정보를 수집하세요.
+## 🗺️ 내부 데이터 지도
+- **Notion:** 박민준의 이력서, 학습 기록(Python, ROS2, ML), 일기, 프로젝트 기획안
+- **Git:** ROS 2 C++ 소스코드, YOLOv11 트레이닝 스크립트, FastAPI 서버 코드
+- **구조:** Hub(상위 주제) → Leaf(상세 내용) 계층 구조
 
 ## 도구
-1. **internal_search**: 내부 문서 검색 (Notion, GitHub, 내부 DB)
+1. **internal_search**: 내부 문서 검색 (Notion, GitHub)
 2. **web_search**: 외부 웹 검색 (DuckDuckGo)
 
-## 실행 규칙
-1. **Internal Search** 우선 시도
-2. 결과가 부족하면 **Web Search** 시도
-3. 그래도 없으면 "정보 없음" 보고
+## 🔍 검색 전략 (중요!)
+1. **Explore First:** 처음에는 넓은 키워드로 인덱스 탐색
+   - 예: "박민준 ROS2 프로젝트 목록"
+   
+2. **Refine:** 1차 결과에서 힌트를 얻어 구체적으로 재검색
+   - 예: 1차에서 'IMU 센서' 발견 → "박민준 IMU 센서 처리 코드"
+   
+3. **Quality Check:** 결과가 부족하면 다른 키워드로 재시도
+   - 부족 기준: 100자 미만 또는 관련성 낮음
+   - 재시도 키워드: 동의어, 상위 개념, 관련 기술명
 
 ## 이전 작업 결과
 {previous_results}
@@ -191,11 +210,23 @@ class WorkerAgent:
 **오직 JSON만 출력하세요!**
 
 ```json
-{{
-  "thought": "현재 상황과 다음 행동에 대한 추론",
+{{{{
+  "thought": "현재 상황 분석 및 다음 행동 추론 (발견한 힌트 포함)",
   "action": "internal_search 또는 web_search 또는 finish",
-  "query": "검색할 쿼리 (finish인 경우 최종 결과)"
-}}
+  "query": "검색할 쿼리 (구체적이고 명확하게)"
+}}}}
+```
+
+## 예시
+**Task:** "박민준의 ROS2 프로젝트 찾기"
+**1차 시도:**
+```json
+{{{{"thought": "Git 저장소에서 ROS2 관련 프로젝트를 먼저 탐색", "action": "internal_search", "query": "박민준 Git ROS2 프로젝트 목록"}}}}
+```
+**1차 결과:** "ros2_ws 폴더에 slam_bot, hand_tracking 프로젝트 존재"
+**2차 시도:**
+```json
+{{{{"thought": "1차에서 hand_tracking 발견, 상세 정보 수집", "action": "internal_search", "query": "박민준 hand_tracking 프로젝트 기능 설명"}}}}
 ```"""
 
     def __init__(self, vllm_api_url: str = None):
@@ -205,7 +236,7 @@ class WorkerAgent:
             base_url=self.vllm_api_url,
             timeout=60.0
         )
-        self.max_steps = 3
+        self.max_steps = 4  # ✅ 재시도 여유 확보
     
     async def execute_task(
         self,
@@ -227,6 +258,8 @@ class WorkerAgent:
         collected_info = []
         internal_data_found = False
         
+        retry_keywords_used = set()  # 재시도에 사용된 키워드 추적
+        
         for step in range(self.max_steps):
             if thinking_logs is not None:
                 thinking_logs.append(f"  └─ Step {step + 1}/{self.max_steps}...\n")
@@ -243,11 +276,13 @@ class WorkerAgent:
                     return result
                 
                 elif action['action'] == 'internal_search':
-                    if thinking_logs is not None:
-                        thinking_logs.append(f"  🔍 내부 검색 중...\n")
+                    query = action.get('query', task.task)
                     
-                    logger.debug(f'  🔍 Internal Search: {action["query"]}')
-                    search_result = await internal_search_fn(action['query'])
+                    if thinking_logs is not None:
+                        thinking_logs.append(f"  🔍 내부 검색: \"{query[:40]}...\"\n")
+                    
+                    logger.debug(f'  🔍 Internal Search: {query}')
+                    search_result = await internal_search_fn(query)
                     
                     # ✅ 검색 결과 품질 평가 강화
                     result_length = len(search_result) if search_result else 0
@@ -257,17 +292,37 @@ class WorkerAgent:
                         collected_info.append(f"[내부 검색 결과]\n{search_result[:1000]}")
                         if thinking_logs is not None:
                             thinking_logs.append(f"  ✅ 내부 데이터 충분 ({result_length}자)\n")
+                            
                     elif result_length > 100:  # 부분적 데이터
                         internal_data_found = True
                         collected_info.append(f"[내부 검색 결과 - 부분적]\n{search_result[:1000]}")
                         if thinking_logs is not None:
-                            thinking_logs.append(f"  ⚠️ 내부 데이터 부분적 ({result_length}자) - 웹 검색 권장\n")
-                    else:  # 데이터 부족
-                        collected_info.append("[내부 검색 결과] 관련 정보 부족")
+                            thinking_logs.append(f"  ⚠️ 부분적 ({result_length}자) - 추가 탐색 시도\n")
+                            
+                        # ✅ 부분적 데이터일 때 힌트 추출하여 재검색 유도
+                        hints = self._extract_hints(search_result)
+                        if hints and step < self.max_steps - 1:
+                            if thinking_logs is not None:
+                                thinking_logs.append(f"  💡 발견된 힌트: {hints[:50]}...\n")
+                            collected_info.append(f"[발견된 힌트] {hints}")
+                            
+                    else:  # 데이터 부족 - 재시도 또는 웹 검색
                         if thinking_logs is not None:
-                            thinking_logs.append(f"  ❌ 내부 데이터 부족 ({result_length}자) - 웹 검색 필요\n")
+                            thinking_logs.append(f"  ❌ 부족 ({result_length}자)\n")
                         
-                        # ✅ 데이터 부족 시 자동으로 웹 검색 시도
+                        # ✅ 다른 키워드로 재시도 (최대 1회)
+                        if query not in retry_keywords_used and step < self.max_steps - 1:
+                            retry_keywords_used.add(query)
+                            alt_query = self._generate_alternative_query(task.task, query)
+                            if alt_query and alt_query != query:
+                                if thinking_logs is not None:
+                                    thinking_logs.append(f"  🔄 대체 키워드로 재시도: \"{alt_query[:30]}...\"\n")
+                                collected_info.append(f"[재시도 필요] 키워드 변경: {alt_query}")
+                                continue
+                        
+                        collected_info.append("[내부 검색 결과] 관련 정보 부족")
+                        
+                        # 웹 검색 권한 확인
                         if not has_search_permission:
                             if thinking_logs is not None:
                                 thinking_logs.append(f"  ⏸️ 웹 검색 허용 필요\n")
@@ -342,6 +397,51 @@ class WorkerAgent:
         
         # Fallback
         return {'thought': raw, 'action': 'finish', 'query': raw}
+    
+    def _extract_hints(self, text: str) -> str:
+        """검색 결과에서 힌트(키워드, 이름, 기술명) 추출"""
+        if not text:
+            return ""
+        
+        # 주요 키워드 패턴 추출
+        keywords = []
+        
+        # 기술 스택 관련
+        tech_patterns = ['ROS2', 'ROS 2', 'Python', 'C++', 'FastAPI', 'YOLO', 'IMU', 'SLAM', 'ML', 'AI']
+        for tech in tech_patterns:
+            if tech.lower() in text.lower():
+                keywords.append(tech)
+        
+        # 프로젝트명 패턴 (언더스코어 포함 단어)
+        import re
+        project_names = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]{3,}', text)
+        keywords.extend(project_names[:3])
+        
+        return ', '.join(set(keywords)[:5]) if keywords else ""
+    
+    def _generate_alternative_query(self, original_task: str, failed_query: str) -> str:
+        """실패한 검색어를 기반으로 대체 검색어 생성"""
+        # 키워드 변형 규칙
+        alternatives = {
+            '공부': '학습 기록',
+            '프로젝트': '작업 내역',
+            '코드': '소스코드 파일',
+            'ROS2': 'ROS 2 패키지',
+            '이력서': '프로필 개요',
+        }
+        
+        new_query = failed_query
+        for old, new in alternatives.items():
+            if old in failed_query:
+                new_query = failed_query.replace(old, new)
+                break
+        
+        # 검색어가 변경되지 않았으면 "개요" 또는 "목록" 추가
+        if new_query == failed_query:
+            if '목록' not in failed_query and '개요' not in failed_query:
+                new_query = f"{failed_query} 목록"
+        
+        return new_query
 
 
 class HierarchicalAgent:

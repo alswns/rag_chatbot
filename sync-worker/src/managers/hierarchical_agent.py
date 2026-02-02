@@ -334,30 +334,27 @@ class HierarchicalAgent:
         context = AgentContext(original_query=query)
         
         # === Step 1: Planning ===
-        yield {"type": "thinking", "step": "planning", "content": "🧠 질문 분석 중..."}
-        
         context.plan = await self.manager.create_plan(query)
         
-        plan_summary = "\n".join([f"  {t.id}. {t.task}" for t in context.plan])
-        yield {
-            "type": "thinking",
-            "step": "plan_created",
-            "content": f"📋 계획 수립 완료:\n{plan_summary}"
-        }
+        # 계획 요약
+        plan_lines = []
+        plan_lines.append(f"🧠 **질문 분석**: {query[:50]}...")
+        plan_lines.append(f"📋 **계획**:")
+        for t in context.plan:
+            plan_lines.append(f"  {t.id}. {t.task}")
+        
+        yield {"type": "thinking", "content": "\n".join(plan_lines)}
         
         # === Step 2: Execute Tasks ===
         for task in context.plan:
             # 의존성 체크
             if task.depends_on and task.depends_on not in context.context_memory:
-                # 의존하는 작업이 아직 완료되지 않음 - 스킵하지 않고 진행
                 pass
             
             task.status = "running"
             yield {
                 "type": "thinking",
-                "step": "task_start",
-                "task_id": task.id,
-                "content": f"🔧 작업 {task.id} 실행: {task.task}"
+                "content": f"🔧 **작업 {task.id}**: {task.task}"
             }
             
             # Worker 실행
@@ -372,15 +369,18 @@ class HierarchicalAgent:
             task.status = "completed"
             context.context_memory[task.id] = result
             
+            # 작업 완료 로그 (검색 결과 미리보기 포함)
+            result_preview = result[:100] + "..." if len(result) > 100 else result
             yield {
                 "type": "thinking",
-                "step": "task_complete",
-                "task_id": task.id,
-                "content": f"✅ 작업 {task.id} 완료"
+                "content": f"✅ **작업 {task.id} 완료**: {result_preview}"
             }
         
-        # === Step 3: Generate Final Answer ===
-        yield {"type": "thinking", "step": "synthesizing", "content": "📝 최종 답변 생성 중..."}
+        # === Step 3: Cross-Check ===
+        yield {"type": "thinking", "content": "🔍 **크로스 체크**: 내부 문서와 웹 검색 결과 대조 중..."}
+        
+        # === Step 4: Generate Final Answer ===
+        yield {"type": "thinking", "content": "📝 **최종 답변 생성 중**..."}
         
         final_answer = await self._generate_final_answer(context)
         
@@ -421,35 +421,45 @@ class HierarchicalAgent:
 ### 1. 출처 간 교차 검증
 - **내부 문서**와 **웹 검색** 결과를 비교하세요.
 - 두 출처의 정보가 **일치**하면 → 신뢰도 높음 ✅
-- 두 출처의 정보가 **충돌**하면 → 내부 문서 우선, 웹 정보는 참고용으로 표시
+- 두 출처의 정보가 **충돌**하면 → 내부 문서 우선, 웹 정보는 참고용으로 표시하고 **사용자에게 경고**
 
 ### 2. 할루시네이션 방지
 - 수집된 정보에 **명시적으로 언급되지 않은 내용**은 절대 추가하지 마세요.
 - 웹 검색에서 **다른 사람/기관의 정보**가 섞여 있을 수 있으므로 주의하세요.
-- 예: "박민준" 검색 시 동명이인 정보가 포함될 수 있음
+- 예: "박민준" 검색 시 동명이인 정보가 포함될 수 있음 → **"웹에서는 A라고 나오지만, 내부 문서 기준으로는 B가 맞습니다."**
 
-### 3. 불확실성 표시
+### 3. 웹 검색 허용 요청 (중요)
+- 만약 내부 문서가 부족하거나 없다면, 답변 끝에 다음 문구를 추가하세요:
+  **"내부 자료가 부족합니다. 더 정확한 확인을 위해 웹 검색을 진행할까요?"**
+- 단, 사용자 질문에 "검색해서", "구글", "검색" 등의 키워드가 있다면 이미 허용된 것으로 간주하고 웹 검색 결과를 포함하세요.
+
+### 4. 불확실성 표시
 - 확인되지 않은 정보: `(확인 필요)` 표시
 - 출처가 웹만인 경우: `(웹 검색 기반, 검증 권장)` 표시
+- 내부와 웹이 충돌하는 경우: `(웹 정보: ..., 내부 문서: ...)`로 병기
 - 정보가 없는 경우: "해당 정보를 찾을 수 없습니다" 명시
 
-### 4. 답변 형식
+### 5. 답변 형식
 - 한국어로 자연스럽고 구조화된 답변
 - 핵심 정보를 먼저, 부가 정보는 뒤에
 - 마지막에 출처 명시
 
-### 5. 출처 표기
+### 6. 출처 표기 (필수)
 ```
 ---
 📌 **참고 출처:**
 - [내부 문서] 문서명
 - [웹 검색] URL (검증 권장)
-```"""
+```
+
+**충돌 시 경고 예시:**
+"웹 검색에서는 '중앙대학교의 총장이 Morakinyo A.O. Kuti 교수'라고 나오지만, 이는 다른 학과나 해외 대학과 혼동된 정보일 수 있습니다. 내부 문서를 기준으로는 [정확한 정보]입니다."
+"""
 
         response = self.client.chat.completions.create(
             model=os.getenv('LLM_MODEL_ID', 'DeepSeek-R1'),
             messages=[
-                {'role': 'system', 'content': '정보 검증 및 통합 전문가입니다. 크로스 체크를 통해 할루시네이션을 방지합니다.'},
+                {'role': 'system', 'content': '정보 검증 및 통합 전문가입니다. 크로스 체크를 통해 할루시네이션을 방지하고, 충돌 시 사용자에게 명확히 경고합니다.'},
                 {'role': 'user', 'content': synthesis_prompt}
             ],
             temperature=0.2,  # 더 낮은 temperature로 일관성 확보

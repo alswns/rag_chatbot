@@ -408,7 +408,7 @@ class HierarchicalAgent:
             if task.result:
                 collected_data.append(f"[작업 {task.id}: {task.task}]\n{task.result}")
         
-        synthesis_prompt = f"""당신은 정보 통합 전문가입니다.
+        synthesis_prompt = f"""당신은 **정보 검증 및 통합 전문가**입니다.
 
 ## 원래 질문
 {context.original_query}
@@ -416,19 +416,43 @@ class HierarchicalAgent:
 ## 수집된 정보
 {chr(10).join(collected_data)}
 
-## 지침
-1. 수집된 정보를 바탕으로 원래 질문에 답변하세요.
-2. 정보가 부족한 부분은 솔직하게 "확인되지 않음"이라고 표시하세요.
-3. 한국어로 자연스럽고 구조화된 답변을 작성하세요.
-4. 답변 마지막에 출처를 명시하세요."""
+## ⚠️ 크로스 체크 지침 (CRITICAL)
+
+### 1. 출처 간 교차 검증
+- **내부 문서**와 **웹 검색** 결과를 비교하세요.
+- 두 출처의 정보가 **일치**하면 → 신뢰도 높음 ✅
+- 두 출처의 정보가 **충돌**하면 → 내부 문서 우선, 웹 정보는 참고용으로 표시
+
+### 2. 할루시네이션 방지
+- 수집된 정보에 **명시적으로 언급되지 않은 내용**은 절대 추가하지 마세요.
+- 웹 검색에서 **다른 사람/기관의 정보**가 섞여 있을 수 있으므로 주의하세요.
+- 예: "박민준" 검색 시 동명이인 정보가 포함될 수 있음
+
+### 3. 불확실성 표시
+- 확인되지 않은 정보: `(확인 필요)` 표시
+- 출처가 웹만인 경우: `(웹 검색 기반, 검증 권장)` 표시
+- 정보가 없는 경우: "해당 정보를 찾을 수 없습니다" 명시
+
+### 4. 답변 형식
+- 한국어로 자연스럽고 구조화된 답변
+- 핵심 정보를 먼저, 부가 정보는 뒤에
+- 마지막에 출처 명시
+
+### 5. 출처 표기
+```
+---
+📌 **참고 출처:**
+- [내부 문서] 문서명
+- [웹 검색] URL (검증 권장)
+```"""
 
         response = self.client.chat.completions.create(
             model=os.getenv('LLM_MODEL_ID', 'DeepSeek-R1'),
             messages=[
-                {'role': 'system', 'content': '정보 통합 전문가입니다.'},
+                {'role': 'system', 'content': '정보 검증 및 통합 전문가입니다. 크로스 체크를 통해 할루시네이션을 방지합니다.'},
                 {'role': 'user', 'content': synthesis_prompt}
             ],
-            temperature=0.3,
+            temperature=0.2,  # 더 낮은 temperature로 일관성 확보
             max_tokens=2048,
             stream=False
         )

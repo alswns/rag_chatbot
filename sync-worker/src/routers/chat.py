@@ -92,12 +92,12 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
                 {'role': 'system', 'content': 'You are a helpful assistant.'},
                 {'role': 'user', 'content': user_message}
             ]
-        # 복합 질문 감지 → Hierarchical Agent 사용
-        elif is_complex_query(user_message) and request.stream:
-            logger.info('🧠 복합 질문 감지 → Hierarchical Agent 실행')
+        # ✅ 항상 Hierarchical Agent 사용 (스트리밍 모드일 때)
+        elif request.stream:
+            logger.info('🧠 Hierarchical Agent 실행')
             return await handle_hierarchical_agent(request, user_message)
         else:
-            # 단순 질문 → 기존 RAG 파이프라인
+            # 비스트리밍 → 기존 RAG 파이프라인
             logger.info('Step 1: RAG 검색...')
             context = await VectorSearchManager.search(user_message)
             logger.info(f'검색 완료: {len(context)}자')
@@ -259,29 +259,49 @@ async def handle_hierarchical_agent(request: ChatCompletionRequest, user_message
         """OpenAI 호환 SSE 스트림 생성"""
         created = int(datetime.now().timestamp())
         
+        # 첫 번째 청크: "생각 중..." 표시
+        thinking_indicator = {
+            "id": f"chatcmpl-{created}",
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": MODEL_NAME,
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "content": "🧠 **분석 중...**\n\n"
+                },
+                "finish_reason": None
+            }]
+        }
+        yield f"data: {json.dumps(thinking_indicator)}\n\n"
+        
+        thinking_logs = []
+        
         async for event in agent.run(user_message, internal_search_fn, web_search_fn):
             if event["type"] == "thinking":
-                # OpenWebUI 호환 thinking 메시지
-                # <details> 태그로 접을 수 있는 진행 상황 표시
-                thinking_content = event["content"]
-                
-                chunk = {
-                    "id": f"chatcmpl-{created}",
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": MODEL_NAME,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {
-                            "role": "assistant",
-                            "content": f"<details open><summary>🤔 {event.get('step', 'thinking')}</summary>\n\n{thinking_content}\n\n</details>\n\n"
-                        },
-                        "finish_reason": None
-                    }]
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
+                # 생각 과정을 로그에 저장 (접힌 details로 나중에 표시)
+                thinking_logs.append(f"- {event['content']}")
             
             elif event["type"] == "result":
+                # 생각 과정을 접힌 details로 먼저 표시
+                if thinking_logs:
+                    thinking_summary = "\n".join(thinking_logs)
+                    details_chunk = {
+                        "id": f"chatcmpl-{created}",
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": MODEL_NAME,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "content": f"<details>\n<summary>💭 사고 과정 보기 (클릭)</summary>\n\n{thinking_summary}\n\n</details>\n\n---\n\n"
+                            },
+                            "finish_reason": None
+                        }]
+                    }
+                    yield f"data: {json.dumps(details_chunk)}\n\n"
+                
                 # 최종 답변
                 content = event["content"]
                 

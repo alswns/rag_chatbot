@@ -168,6 +168,7 @@ class WorkerAgent:
     하나의 Task를 수행하며 Internal → Web 순서로 도구 사용
     """
     
+    # Note: {{, }}로 escape하여 .format()과 충돌 방지
     SYSTEM_PROMPT = """당신은 **현장 요원**입니다.
 
 ## 역할
@@ -189,11 +190,11 @@ class WorkerAgent:
 **오직 JSON만 출력하세요!**
 
 ```json
-{
+{{
   "thought": "현재 상황과 다음 행동에 대한 추론",
   "action": "internal_search 또는 web_search 또는 finish",
   "query": "검색할 쿼리 (finish인 경우 최종 결과)"
-}
+}}
 ```"""
 
     def __init__(self, vllm_api_url: str = None):

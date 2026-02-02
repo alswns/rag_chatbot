@@ -214,7 +214,7 @@ class WorkerAgent:
         internal_search_fn,
         web_search_fn,
         has_search_permission: bool = False,
-        thinking_stream=None
+        thinking_logs: List[str] = None
     ) -> str:
         """단일 작업 실행 (ReAct Loop with Real-time Streaming)"""
         logger.info(f'🔧 Worker: [{task.id}] {task.task}')
@@ -228,8 +228,8 @@ class WorkerAgent:
         internal_data_found = False
         
         for step in range(self.max_steps):
-            if thinking_stream:
-                await thinking_stream(f"  └─ Step {step + 1}/{self.max_steps}...")
+            if thinking_logs is not None:
+                thinking_logs.append(f"  └─ Step {step + 1}/{self.max_steps}...\n")
             
             logger.debug(f'  Step {step + 1}/{self.max_steps}')
             
@@ -243,8 +243,8 @@ class WorkerAgent:
                     return result
                 
                 elif action['action'] == 'internal_search':
-                    if thinking_stream:
-                        await thinking_stream(f" 🔍 내부 검색 중...\n")
+                    if thinking_logs is not None:
+                        thinking_logs.append(f"  🔍 내부 검색 중...\n")
                     
                     logger.debug(f'  🔍 Internal Search: {action["query"]}')
                     search_result = await internal_search_fn(action['query'])
@@ -252,30 +252,30 @@ class WorkerAgent:
                     if search_result and len(search_result) > 100:  # 충분한 내부 데이터
                         internal_data_found = True
                         collected_info.append(f"[내부 검색 결과]\n{search_result[:1000]}")
-                        if thinking_stream:
-                            await thinking_stream(f" ✅ 내부 데이터 발견 ({len(search_result)}자)\n")
+                        if thinking_logs is not None:
+                            thinking_logs.append(f"  ✅ 내부 데이터 발견 ({len(search_result)}자)\n")
                     else:
                         collected_info.append("[내부 검색 결과] 관련 정보 부족")
-                        if thinking_stream:
-                            await thinking_stream(f" ⚠️ 내부 데이터 부족\n")
+                        if thinking_logs is not None:
+                            thinking_logs.append(f"  ⚠️ 내부 데이터 부족\n")
                 
                 elif action['action'] == 'web_search':
                     # === Permission Check ===
                     if not has_search_permission:
                         # 검색 허용 없음 → 중단하고 허용 요청
-                        if thinking_stream:
-                            await thinking_stream(f" ⏸️ 웹 검색 보류 (허용 필요)\n")
+                        if thinking_logs is not None:
+                            thinking_logs.append(f"  ⏸️ 웹 검색 보류 (허용 필요)\n")
                         return "[PERMISSION_NEEDED]내부 자료가 부족합니다."
                     
-                    if thinking_stream:
-                        await thinking_stream(f" 🌐 웹 검색 중...\n")
+                    if thinking_logs is not None:
+                        thinking_logs.append(f"  🌐 웹 검색 중...\n")
                     
                     logger.debug(f'  🌐 Web Search: {action["query"]}')
                     search_result = await web_search_fn(action['query'])
                     if search_result:
                         collected_info.append(f"[웹 검색 결과]\n{search_result[:1000]}")
-                        if thinking_stream:
-                            await thinking_stream(f" ✅ 웹 정보 획득\n")
+                        if thinking_logs is not None:
+                            thinking_logs.append(f"  ✅ 웹 정보 획득\n")
                     else:
                         collected_info.append("[웹 검색 결과] 관련 정보 없음")
                 
@@ -391,25 +391,28 @@ class HierarchicalAgent:
         # === Step 3: Execute Tasks ===
         needs_permission_request = False
         
-        # thinking_stream 헬퍼 함수 정의
-        async def stream_thinking(content):
-            yield {"type": "thinking", "content": content}
-            await asyncio.sleep(0.05)
-        
         for task in context.plan:
             task.status = "running"
             yield {"type": "thinking", "content": f"🔧 **작업 {task.id}**: {task.task}\n"}
             await asyncio.sleep(0.05)
             
             # Worker 실행 (실시간 스트리밍)
+            # thinking_logs를 수집하여 나중에 yield
+            thinking_logs = []
+            
             result = await self.worker.execute_task(
                 task=task,
                 context_memory=context.context_memory,
                 internal_search_fn=internal_search_fn,
                 web_search_fn=web_search_fn,
                 has_search_permission=has_search_permission,
-                thinking_stream=stream_thinking
+                thinking_logs=thinking_logs  # 로그 수집용 리스트 전달
             )
+            
+            # 수집된 thinking_logs를 실시간으로 yield
+            for log in thinking_logs:
+                yield {"type": "thinking", "content": log}
+                await asyncio.sleep(0.05)
             
             # 검색 허용 요청이 필요한지 체크
             if result.startswith("[PERMISSION_NEEDED]"):

@@ -258,11 +258,10 @@ async def handle_hierarchical_agent(request: ChatCompletionRequest, user_message
     async def generate_stream():
         """OpenAI 호환 SSE 스트림 생성 (실시간 증분)"""
         created = int(datetime.now().timestamp())
-        details_opened = False
         
         async for event in agent.run(user_message, internal_search_fn, web_search_fn):
             if event["type"] == "thinking_start":
-                # details 태그 시작 (open 상태)
+                # details 태그 시작 (빈 줄 포함)
                 chunk = {
                     "id": f"chatcmpl-{created}",
                     "object": "chat.completion.chunk",
@@ -272,16 +271,15 @@ async def handle_hierarchical_agent(request: ChatCompletionRequest, user_message
                         "index": 0,
                         "delta": {
                             "role": "assistant",
-                            "content": "<details open>\n<summary>thought: 생각 중...</summary>\n\n"
+                            "content": "\n\n<details open>\n<summary>thought: 생각 중...</summary>\n\n"
                         },
                         "finish_reason": None
                     }]
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
-                details_opened = True
                 
             elif event["type"] == "thinking":
-                # 실시간 사고 과정 추가
+                # 실시간 사고 과정 추가 (리스트 형식)
                 chunk = {
                     "id": f"chatcmpl-{created}",
                     "object": "chat.completion.chunk",
@@ -295,9 +293,66 @@ async def handle_hierarchical_agent(request: ChatCompletionRequest, user_message
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
             
-            elif event["type"] == "thinking_end":
-                # details 태그 종료
+            elif event["type"] == "permission_needed":
+                # 검색 허용 요청 - details 내부에 표시하고 종료
+                permission_msg = "\n\n⚠️ **알림**: 내부 자료가 부족합니다. 웹 검색을 승인하시겠습니까?\n\n"
                 chunk = {
+                    "id": f"chatcmpl-{created}",
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": MODEL_NAME,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": permission_msg},
+                        "finish_reason": None
+                    }]
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+                
+                # details 닫기
+                close_chunk = {
+                    "id": f"chatcmpl-{created}",
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": MODEL_NAME,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": "\n\n</details>\n\n"},
+                        "finish_reason": None
+                    }]
+                }
+                yield f"data: {json.dumps(close_chunk)}\n\n"
+                
+                # 스트림 종료
+                final_chunk = {
+                    "id": f"chatcmpl-{created}",
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": MODEL_NAME,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop"
+                    }]
+                }
+                yield f"data: {json.dumps(final_chunk)}\n\n"
+                yield "data: [DONE]\n\n"
+                return  # 여기서 종료
+            
+            elif event["type"] == "thinking_end":
+                # details 태그 종료 (빈 줄 포함)
+                chunk = {
+                    "id": f"chatcmpl-{created}",
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": MODEL_NAME,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": "\n\n</details>\n\n---\n\n"},
+                        "finish_reason": None
+                    }]
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
                     "id": f"chatcmpl-{created}",
                     "object": "chat.completion.chunk",
                     "created": created,

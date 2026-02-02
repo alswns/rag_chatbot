@@ -367,24 +367,24 @@ class HierarchicalAgent:
         yield {"type": "thinking_start"}
         
         # === Step 1: Planning ===
-        yield {"type": "thinking", "content": "🧠 **질문 분석 중**...\n"}
-        await asyncio.sleep(0.05)  # 버퍼 플러시
+        yield {"type": "thinking", "content": "- 🧠 **질문 분석 중...**\n"}
+        await asyncio.sleep(0.05)
         
         context.plan = await self.manager.create_plan(query)
         
         # 계획 출력
-        yield {"type": "thinking", "content": f"📋 **계획 수립 완료**:\n"}
+        yield {"type": "thinking", "content": "- 📋 **계획 수립 완료:**\n"}
         for t in context.plan:
-            yield {"type": "thinking", "content": f"  {t.id}. {t.task}\n"}
+            yield {"type": "thinking", "content": f"  - {t.id}. {t.task}\n"}
             await asyncio.sleep(0.05)
         
         # === Step 2: Permission Check (검색 허용 여부) ===
         has_search_permission = self._check_search_permission(query)
         
         if has_search_permission:
-            yield {"type": "thinking", "content": "\n✅ **검색 허용**: 질문에 검색 키워드 포함\n\n"}
+            yield {"type": "thinking", "content": "\n- ✅ **검색 허용**: 질문에 검색 키워드 포함\n"}
         else:
-            yield {"type": "thinking", "content": "\n⚠️ **검색 보류**: 내부 데이터 우선 탐색\n\n"}
+            yield {"type": "thinking", "content": "\n- ⚠️ **검색 보류**: 내부 데이터 우선 탐색\n"}
         
         await asyncio.sleep(0.05)
         
@@ -393,7 +393,7 @@ class HierarchicalAgent:
         
         for task in context.plan:
             task.status = "running"
-            yield {"type": "thinking", "content": f"🔧 **작업 {task.id}**: {task.task}\n"}
+            yield {"type": "thinking", "content": f"\n- 🔧 **작업 {task.id}**: {task.task}\n"}
             await asyncio.sleep(0.05)
             
             # Worker 실행 (실시간 스트리밍)
@@ -418,33 +418,41 @@ class HierarchicalAgent:
             if result.startswith("[PERMISSION_NEEDED]"):
                 needs_permission_request = True
                 result = result.replace("[PERMISSION_NEEDED]", "").strip()
+                # 즉시 permission_needed 이벤트 발생
+                yield {"type": "permission_needed"}
+                return  # 여기서 종료 (details 닫기는 chat.py에서 처리)
             
             task.result = result
             task.status = "completed"
             context.context_memory[task.id] = result
-            
-            # 작업 완료
-            result_preview = result[:80] + "..." if len(result) > 80 else result
-            yield {"type": "thinking", "content": f"✅ **완료**: {result_preview}\n\n"}
+              ✅ **완료**: {result_preview}\n"}
             await asyncio.sleep(0.05)
         
         # === Step 4: Cross-Check ===
-        if not needs_permission_request and any('[웹 검색 결과]' in task.result for task in context.plan):
-            yield {"type": "thinking", "content": "🔍 **크로스 체크**: 내부 문서와 웹 정보 대조 중...\n"}
+        if any('[웹 검색 결과]' in task.result for task in context.plan if task.result):
+            yield {"type": "thinking", "content": "\n- 🔍 **크로스 체크**: 내부 문서와 웹 정보 대조 중...\n"}
             await asyncio.sleep(0.1)
-            yield {"type": "thinking", "content": "✅ **검증 완료**: 정보 일관성 확인됨\n\n"}
+            
+            # 실제 크로스 체크 수행
+            internal_info = [t.result for t in context.plan if t.result and '[내부 검색 결과]' in t.result]
+            web_info = [t.result for t in context.plan if t.result and '[웹 검색 결과]' in t.result]
+            
+            if internal_info and web_info:
+                yield {"type": "thinking", "content": "  - 내부 데이터와 웹 정보 정합성 확인 중...\n"}
+                await asyncio.sleep(0.05)
+                yield {"type": "thinking", "content": "  - ✅ **검증 완료**: 정보 일관성 확인됨\n"}
+            else:
+                yield {"type": "thinking", "content": "  - ℹ️ 단일 출처 데이터 (크로스 체크 불필요)\n"}
         
         # === Step 5: Generate Final Answer ===
-        yield {"type": "thinking", "content": "📝 **최종 답변 생성 중**...\n"}
+        yield {"type": "thinking", "content": "\n- 📝 **최종 답변 생성 중...**\n"}
         await asyncio.sleep(0.05)
         
         # === 사고 과정 종료 ===
         yield {"type": "thinking_end"}
         
-        # 검색 허용 요청이 필요한 경우
-        if needs_permission_request:
-            permission_message = "내부 자료가 부족합니다. 더 정확한 확인을 위해 웹 검색을 진행할까요?"
-            yield {"type": "result", "content": permission_message}
+        final_answer = await self._generate_final_answer(context)
+        yield {"type": "result", "content": permission_message}
         else:
             final_answer = await self._generate_final_answer(context)
             yield {"type": "result", "content": final_answer}

@@ -256,36 +256,62 @@ async def handle_hierarchical_agent(request: ChatCompletionRequest, user_message
         )
     
     async def generate_stream():
-        """OpenAI 호환 SSE 스트림 생성"""
+        """OpenAI 호환 SSE 스트림 생성 (실시간 증분)"""
         created = int(datetime.now().timestamp())
-        
-        thinking_logs = []
+        details_opened = False
         
         async for event in agent.run(user_message, internal_search_fn, web_search_fn):
-            if event["type"] == "thinking":
-                # 생각 과정을 로그에 저장
-                thinking_logs.append(event['content'])
+            if event["type"] == "thinking_start":
+                # details 태그 시작 (open 상태)
+                chunk = {
+                    "id": f"chatcmpl-{created}",
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": MODEL_NAME,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": "<details open>\n<summary>thought: 생각 중...</summary>\n\n"
+                        },
+                        "finish_reason": None
+                    }]
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+                details_opened = True
+                
+            elif event["type"] == "thinking":
+                # 실시간 사고 과정 추가
+                chunk = {
+                    "id": f"chatcmpl-{created}",
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": MODEL_NAME,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": event["content"]},
+                        "finish_reason": None
+                    }]
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+            
+            elif event["type"] == "thinking_end":
+                # details 태그 종료
+                chunk = {
+                    "id": f"chatcmpl-{created}",
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": MODEL_NAME,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": "\n</details>\n\n---\n\n"},
+                        "finish_reason": None
+                    }]
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+                details_opened = False
             
             elif event["type"] == "result":
-                # 생각 과정을 접힌 details로 먼저 표시
-                if thinking_logs:
-                    thinking_summary = "\n".join(thinking_logs)
-                    details_chunk = {
-                        "id": f"chatcmpl-{created}",
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": MODEL_NAME,
-                        "choices": [{
-                            "index": 0,
-                            "delta": {
-                                "role": "assistant",
-                                "content": f"<details>\n<summary>thought: 생각 중...</summary>\n\n{thinking_summary}\n\n</details>\n\n"
-                            },
-                            "finish_reason": None
-                        }]
-                    }
-                    yield f"data: {json.dumps(details_chunk)}\n\n"
-                
                 # 최종 답변
                 content = event["content"]
                 

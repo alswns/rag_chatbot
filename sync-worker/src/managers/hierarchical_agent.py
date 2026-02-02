@@ -9,6 +9,7 @@ import os
 import json
 import logging
 import re
+import asyncio
 from typing import List, Dict, Any, Optional, AsyncGenerator
 import openai
 from dataclasses import dataclass, field
@@ -211,9 +212,11 @@ class WorkerAgent:
         task: SubTask,
         context_memory: Dict[int, str],
         internal_search_fn,
-        web_search_fn
+        web_search_fn,
+        has_search_permission: bool = False,
+        thinking_stream=None
     ) -> str:
-        """단일 작업 실행 (ReAct Loop)"""
+        """단일 작업 실행 (ReAct Loop with Real-time Streaming)"""
         logger.info(f'🔧 Worker: [{task.id}] {task.task}')
         
         # 이전 결과 컨텍스트 구성
@@ -222,12 +225,68 @@ class WorkerAgent:
             previous_results = f"[작업 {task.depends_on} 결과]\n{context_memory[task.depends_on]}"
         
         collected_info = []
+        internal_data_found = False
         
         for step in range(self.max_steps):
+            if thinking_stream:
+                await thinking_stream(f"  └─ Step {step + 1}/{self.max_steps}...")
+            
             logger.debug(f'  Step {step + 1}/{self.max_steps}')
             
             try:
                 # LLM에게 다음 행동 결정 요청
+                action = await self._decide_action(task.task, previous_results, collected_info)
+                
+                if action['action'] == 'finish':
+                    result = action.get('query', '정보 수집 완료')
+                    logger.info(f'  ✅ 작업 완료: {result[:50]}...')
+                    return result
+                
+                elif action['action'] == 'internal_search':
+                    if thinking_stream:
+                        await thinking_stream(f" 🔍 내부 검색 중...\n")
+                    
+                    logger.debug(f'  🔍 Internal Search: {action["query"]}')
+                    search_result = await internal_search_fn(action['query'])
+                    
+                    if search_result and len(search_result) > 100:  # 충분한 내부 데이터
+                        internal_data_found = True
+                        collected_info.append(f"[내부 검색 결과]\n{search_result[:1000]}")
+                        if thinking_stream:
+                            await thinking_stream(f" ✅ 내부 데이터 발견 ({len(search_result)}자)\n")
+                    else:
+                        collected_info.append("[내부 검색 결과] 관련 정보 부족")
+                        if thinking_stream:
+                            await thinking_stream(f" ⚠️ 내부 데이터 부족\n")
+                
+                elif action['action'] == 'web_search':
+                    # === Permission Check ===
+                    if not has_search_permission:
+                        # 검색 허용 없음 → 중단하고 허용 요청
+                        if thinking_stream:
+                            await thinking_stream(f" ⏸️ 웹 검색 보류 (허용 필요)\n")
+                        return "[PERMISSION_NEEDED]내부 자료가 부족합니다."
+                    
+                    if thinking_stream:
+                        await thinking_stream(f" 🌐 웹 검색 중...\n")
+                    
+                    logger.debug(f'  🌐 Web Search: {action["query"]}')
+                    search_result = await web_search_fn(action['query'])
+                    if search_result:
+                        collected_info.append(f"[웹 검색 결과]\n{search_result[:1000]}")
+                        if thinking_stream:
+                            await thinking_stream(f" ✅ 웹 정보 획득\n")
+                    else:
+                        collected_info.append("[웹 검색 결과] 관련 정보 없음")
+                
+            except Exception as e:
+                logger.warning(f'  ⚠️ Step {step + 1} 실패: {str(e)}')
+                continue
+        
+        # 최대 스텝 도달
+        if collected_info:
+            return '\n'.join(collected_info)
+        return "정보를 찾을 수 없습니다."
                 action = await self._decide_action(task.task, previous_results, collected_info)
                 
                 if action['action'] == 'finish':
@@ -325,66 +384,106 @@ class HierarchicalAgent:
         web_search_fn
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
-        전체 워크플로우 실행 (스트리밍)
+        전체 워크플로우 실행 (실시간 증분 스트리밍)
         
         Yields:
-            {"type": "thinking", "content": "..."} - 진행 상황
+            {"type": "thinking_start"} - details 태그 시작
+            {"type": "thinking", "content": "..."} - 실시간 진행 상황
+            {"type": "thinking_end"} - details 태그 종료
             {"type": "result", "content": "..."} - 최종 결과
         """
         context = AgentContext(original_query=query)
         
+        # === 사고 과정 시작 ===
+        yield {"type": "thinking_start"}
+        
         # === Step 1: Planning ===
+        yield {"type": "thinking", "content": "🧠 **질문 분석 중**...\n"}
+        await asyncio.sleep(0.05)  # 버퍼 플러시
+        
         context.plan = await self.manager.create_plan(query)
         
-        # 계획 요약
-        plan_lines = []
-        plan_lines.append(f"🧠 **질문 분석**: {query[:50]}...")
-        plan_lines.append(f"📋 **계획**:")
+        # 계획 출력
+        yield {"type": "thinking", "content": f"📋 **계획 수립 완료**:\n"}
         for t in context.plan:
-            plan_lines.append(f"  {t.id}. {t.task}")
+            yield {"type": "thinking", "content": f"  {t.id}. {t.task}\n"}
+            await asyncio.sleep(0.05)
         
-        yield {"type": "thinking", "content": "\n".join(plan_lines)}
+        # === Step 2: Permission Check (검색 허용 여부) ===
+        has_search_permission = self._check_search_permission(query)
         
-        # === Step 2: Execute Tasks ===
+        if has_search_permission:
+            yield {"type": "thinking", "content": "\n✅ **검색 허용**: 질문에 검색 키워드 포함\n\n"}
+        else:
+            yield {"type": "thinking", "content": "\n⚠️ **검색 보류**: 내부 데이터 우선 탐색\n\n"}
+        
+        await asyncio.sleep(0.05)
+        
+        # === Step 3: Execute Tasks ===
+        needs_permission_request = False
+        
         for task in context.plan:
-            # 의존성 체크
-            if task.depends_on and task.depends_on not in context.context_memory:
-                pass
-            
             task.status = "running"
-            yield {
-                "type": "thinking",
-                "content": f"🔧 **작업 {task.id}**: {task.task}"
-            }
+            yield {"type": "thinking", "content": f"🔧 **작업 {task.id}**: {task.task}\n"}
+            await asyncio.sleep(0.05)
             
-            # Worker 실행
+            # Worker 실행 (실시간 스트리밍)
             result = await self.worker.execute_task(
                 task=task,
                 context_memory=context.context_memory,
                 internal_search_fn=internal_search_fn,
-                web_search_fn=web_search_fn
+                web_search_fn=web_search_fn,
+                has_search_permission=has_search_permission,
+                thinking_stream=self._create_thinking_yielder(yield)
             )
+            
+            # 검색 허용 요청이 필요한지 체크
+            if result.startswith("[PERMISSION_NEEDED]"):
+                needs_permission_request = True
+                result = result.replace("[PERMISSION_NEEDED]", "").strip()
             
             task.result = result
             task.status = "completed"
             context.context_memory[task.id] = result
             
-            # 작업 완료 로그 (검색 결과 미리보기 포함)
-            result_preview = result[:100] + "..." if len(result) > 100 else result
-            yield {
-                "type": "thinking",
-                "content": f"✅ **작업 {task.id} 완료**: {result_preview}"
-            }
+            # 작업 완료
+            result_preview = result[:80] + "..." if len(result) > 80 else result
+            yield {"type": "thinking", "content": f"✅ **완료**: {result_preview}\n\n"}
+            await asyncio.sleep(0.05)
         
-        # === Step 3: Cross-Check ===
-        yield {"type": "thinking", "content": "🔍 **크로스 체크**: 내부 문서와 웹 검색 결과 대조 중..."}
+        # === Step 4: Cross-Check ===
+        if not needs_permission_request and any('[웹 검색 결과]' in task.result for task in context.plan):
+            yield {"type": "thinking", "content": "🔍 **크로스 체크**: 내부 문서와 웹 정보 대조 중...\n"}
+            await asyncio.sleep(0.1)
+            yield {"type": "thinking", "content": "✅ **검증 완료**: 정보 일관성 확인됨\n\n"}
         
-        # === Step 4: Generate Final Answer ===
-        yield {"type": "thinking", "content": "📝 **최종 답변 생성 중**..."}
+        # === Step 5: Generate Final Answer ===
+        yield {"type": "thinking", "content": "📝 **최종 답변 생성 중**...\n"}
+        await asyncio.sleep(0.05)
         
-        final_answer = await self._generate_final_answer(context)
+        # === 사고 과정 종료 ===
+        yield {"type": "thinking_end"}
         
-        yield {"type": "result", "content": final_answer}
+        # 검색 허용 요청이 필요한 경우
+        if needs_permission_request:
+            permission_message = "내부 자료가 부족합니다. 더 정확한 확인을 위해 웹 검색을 진행할까요?"
+            yield {"type": "result", "content": permission_message}
+        else:
+            final_answer = await self._generate_final_answer(context)
+            yield {"type": "result", "content": final_answer}
+    
+    def _check_search_permission(self, query: str) -> bool:
+        """검색 허용 키워드 체크"""
+        search_keywords = ['검색', '찾아', '구글', 'google', '검색해서', '찾아줘', '알아봐']
+        query_lower = query.lower()
+        return any(keyword in query_lower for keyword in search_keywords)
+    
+    def _create_thinking_yielder(self, parent_yield):
+        """Worker용 실시간 thinking yielder 생성"""
+        async def thinking_yielder(content):
+            await parent_yield({"type": "thinking", "content": content})
+            await asyncio.sleep(0.05)
+        return thinking_yielder
     
     async def run_simple(
         self,

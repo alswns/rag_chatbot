@@ -54,6 +54,11 @@ class VectorSearchManager:
                     if not ENABLE_RERANKING:
                         documents = documents[:top_k]
                     
+                    # ✅ 각 문서를 최대 1000자로 제한 (토큰 오버플로우 방지)
+                    for doc in documents:
+                        if len(doc.content) > 1000:
+                            doc.content = doc.content[:1000] + "..."
+                    
                     # 웹 검색 판단용 결과 저장
                     VectorSearchManager._last_search_results = [
                         {
@@ -64,7 +69,7 @@ class VectorSearchManager:
                     ]
                     
                     context_xml = deps.drill_down_retriever._format_as_xml(documents)
-                    logger.info(f'✅ 드릴다운 검색 완료: {len(documents)}개 문서')
+                    logger.info(f'✅ 드릴다운 검색 완료: {len(documents)}개 문서, {len(context_xml)}자')
                     return context_xml
                 else:
                     VectorSearchManager._last_search_results = []

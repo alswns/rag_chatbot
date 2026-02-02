@@ -249,15 +249,29 @@ class WorkerAgent:
                     logger.debug(f'  🔍 Internal Search: {action["query"]}')
                     search_result = await internal_search_fn(action['query'])
                     
-                    if search_result and len(search_result) > 100:  # 충분한 내부 데이터
+                    # ✅ 검색 결과 품질 평가 강화
+                    result_length = len(search_result) if search_result else 0
+                    
+                    if result_length > 500:  # 충분한 내부 데이터
                         internal_data_found = True
                         collected_info.append(f"[내부 검색 결과]\n{search_result[:1000]}")
                         if thinking_logs is not None:
-                            thinking_logs.append(f"  ✅ 내부 데이터 발견 ({len(search_result)}자)\n")
-                    else:
+                            thinking_logs.append(f"  ✅ 내부 데이터 충분 ({result_length}자)\n")
+                    elif result_length > 100:  # 부분적 데이터
+                        internal_data_found = True
+                        collected_info.append(f"[내부 검색 결과 - 부분적]\n{search_result[:1000]}")
+                        if thinking_logs is not None:
+                            thinking_logs.append(f"  ⚠️ 내부 데이터 부분적 ({result_length}자) - 웹 검색 권장\n")
+                    else:  # 데이터 부족
                         collected_info.append("[내부 검색 결과] 관련 정보 부족")
                         if thinking_logs is not None:
-                            thinking_logs.append(f"  ⚠️ 내부 데이터 부족\n")
+                            thinking_logs.append(f"  ❌ 내부 데이터 부족 ({result_length}자) - 웹 검색 필요\n")
+                        
+                        # ✅ 데이터 부족 시 자동으로 웹 검색 시도
+                        if not has_search_permission:
+                            if thinking_logs is not None:
+                                thinking_logs.append(f"  ⏸️ 웹 검색 허용 필요\n")
+                            return "[PERMISSION_NEEDED]내부 자료가 부족합니다."
                 
                 elif action['action'] == 'web_search':
                     # === Permission Check ===
@@ -367,24 +381,24 @@ class HierarchicalAgent:
         yield {"type": "thinking_start"}
         
         # === Step 1: Planning ===
-        yield {"type": "thinking", "content": "- 🧠 **질문 분석 중...**\n"}
+        yield {"type": "thinking", "content": "\n- 🧠 **질문 분석 중...**\n\n"}
         await asyncio.sleep(0.05)
         
         context.plan = await self.manager.create_plan(query)
         
         # 계획 출력
-        yield {"type": "thinking", "content": "- 📋 **계획 수립 완료:**\n"}
+        yield {"type": "thinking", "content": "\n- 📋 **계획 수립 완료:**\n\n"}
         for t in context.plan:
-            yield {"type": "thinking", "content": f"  - {t.id}. {t.task}\n"}
+            yield {"type": "thinking", "content": f"  - {t.id}. {t.task}\n\n"}
             await asyncio.sleep(0.05)
         
         # === Step 2: Permission Check (검색 허용 여부) ===
         has_search_permission = self._check_search_permission(query)
         
         if has_search_permission:
-            yield {"type": "thinking", "content": "\n- ✅ **검색 허용**: 질문에 검색 키워드 포함\n"}
+            yield {"type": "thinking", "content": "\n- ✅ **검색 허용**: 질문에 검색 키워드 포함\n\n"}
         else:
-            yield {"type": "thinking", "content": "\n- ⚠️ **검색 보류**: 내부 데이터 우선 탐색\n"}
+            yield {"type": "thinking", "content": "\n- ⚠️ **검색 보류**: 내부 데이터 우선 탐색\n\n"}
         
         await asyncio.sleep(0.05)
         
@@ -393,7 +407,7 @@ class HierarchicalAgent:
         
         for task in context.plan:
             task.status = "running"
-            yield {"type": "thinking", "content": f"\n- 🔧 **작업 {task.id}**: {task.task}\n"}
+            yield {"type": "thinking", "content": f"\n- 🔧 **작업 {task.id}**: {task.task}\n\n"}
             await asyncio.sleep(0.05)
             
             # Worker 실행 (실시간 스트리밍)
@@ -409,9 +423,9 @@ class HierarchicalAgent:
                 thinking_logs=thinking_logs  # 로그 수집용 리스트 전달
             )
             
-            # 수집된 thinking_logs를 실시간으로 yield
+            # 수집된 thinking_logs를 실시간으로 yield (빈 줄 추가)
             for log in thinking_logs:
-                yield {"type": "thinking", "content": log}
+                yield {"type": "thinking", "content": f"\n{log}\n"}
                 await asyncio.sleep(0.05)
             
             # 검색 허용 요청이 필요한지 체크
@@ -428,12 +442,12 @@ class HierarchicalAgent:
             
             # 작업 완료
             result_preview = result[:80] + "..." if len(result) > 80 else result
-            yield {"type": "thinking", "content": f"  ✅ **완료**: {result_preview}\n"}
+            yield {"type": "thinking", "content": f"\n  ✅ **완료**: {result_preview}\n\n"}
             await asyncio.sleep(0.05)
         
         # === Step 4: Cross-Check ===
         if any('[웹 검색 결과]' in task.result for task in context.plan if task.result):
-            yield {"type": "thinking", "content": "\n- 🔍 **크로스 체크**: 내부 문서와 웹 정보 대조 중...\n"}
+            yield {"type": "thinking", "content": "\n\n- 🔍 **크로스 체크**: 내부 문서와 웹 정보 대조 중...\n\n"}
             await asyncio.sleep(0.1)
             
             # 실제 크로스 체크 수행
@@ -441,14 +455,14 @@ class HierarchicalAgent:
             web_info = [t.result for t in context.plan if t.result and '[웹 검색 결과]' in t.result]
             
             if internal_info and web_info:
-                yield {"type": "thinking", "content": "  - 내부 데이터와 웹 정보 정합성 확인 중...\n"}
+                yield {"type": "thinking", "content": "\n  - 내부 데이터와 웹 정보 정합성 확인 중...\n\n"}
                 await asyncio.sleep(0.05)
-                yield {"type": "thinking", "content": "  - ✅ **검증 완료**: 정보 일관성 확인됨\n"}
+                yield {"type": "thinking", "content": "\n  - ✅ **검증 완료**: 정보 일관성 확인됨\n\n"}
             else:
-                yield {"type": "thinking", "content": "  - ℹ️ 단일 출처 데이터 (크로스 체크 불필요)\n"}
+                yield {"type": "thinking", "content": "\n  - ℹ️ 단일 출처 데이터 (크로스 체크 불필요)\n\n"}
         
         # === Step 5: Generate Final Answer ===
-        yield {"type": "thinking", "content": "\n- 📝 **최종 답변 생성 중...**\n"}
+        yield {"type": "thinking", "content": "\n\n- 📝 **최종 답변 생성 중...**\n\n"}
         await asyncio.sleep(0.05)
         
         # === 사고 과정 종료 ===

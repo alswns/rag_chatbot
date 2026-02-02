@@ -303,6 +303,7 @@ class GraphDrillDownRetriever:
         Step 2: 그래프 확장 및 범위 설정
         
         Hub 노드의 하위 노드(descendants) + 멘션 관계 노드 수집
+        ✅ 최소 100개 이상의 노드를 수집하여 Reranker에게 넘김
         """
         if hub_node_id not in self.graph:
             logger.warning(f'[Step 2] Hub 노드가 그래프에 없음: {hub_node_id}')
@@ -313,23 +314,47 @@ class GraphDrillDownRetriever:
         # 1. Hub 노드 자체 포함
         allowed_ids.add(hub_node_id)
         
-        # 2. 하위 노드(Descendants) 수집
+        # 2. 하위 노드(Descendants) 수집 - ✅ 제한 없이 모두 수집
         try:
             descendants = nx.descendants(self.graph, hub_node_id)
             allowed_ids.update(descendants)
-            logger.debug(f'[Step 2] Descendants: {len(descendants)}개')
+            logger.info(f'[Step 2] Descendants: {len(descendants)}개')
         except nx.NetworkXError as e:
             logger.debug(f'[Step 2] Descendants 탐색 실패: {str(e)}')
         
-        # 3. Mention 엣지로 연결된 노드 수집 (depth=1)
-        if self.mention_depth > 0:
-            mention_nodes = self._get_mention_neighbors(hub_node_id, depth=self.mention_depth)
-            allowed_ids.update(mention_nodes)
-            logger.debug(f'[Step 2] Mention 관계: {len(mention_nodes)}개')
+        # 3. Mention 엣지로 연결된 노드 수집 - ✅ depth=2로 확장
+        mention_depth = max(self.mention_depth, 2)  # 최소 2단계
+        mention_nodes = self._get_mention_neighbors(hub_node_id, depth=mention_depth)
+        allowed_ids.update(mention_nodes)
+        logger.info(f'[Step 2] Mention 관계 (depth={mention_depth}): {len(mention_nodes)}개')
         
-        # 4. 모든 수집된 노드의 청크 ID도 포함
+        # 4. ✅ 부모 노드도 포함 (ancestors)
+        try:
+            ancestors = nx.ancestors(self.graph, hub_node_id)
+            allowed_ids.update(ancestors)
+            logger.info(f'[Step 2] Ancestors: {len(ancestors)}개')
+        except nx.NetworkXError as e:
+            logger.debug(f'[Step 2] Ancestors 탐색 실패: {str(e)}')
+        
+        # 5. ✅ 형제 노드도 포함 (siblings)
+        try:
+            for parent in self.graph.predecessors(hub_node_id):
+                siblings = set(self.graph.successors(parent))
+                allowed_ids.update(siblings)
+                logger.debug(f'[Step 2] Siblings from {parent}: {len(siblings)}개')
+        except Exception as e:
+            logger.debug(f'[Step 2] Siblings 탐색 실패: {str(e)}')
+        
+        # 6. 모든 수집된 노드의 청크 ID도 포함
         chunk_ids = self._get_chunk_ids(list(allowed_ids))
         allowed_ids.update(chunk_ids)
+        
+        # ✅ 최소 100개 보장 로깅
+        total_nodes = len(allowed_ids)
+        if total_nodes < 100:
+            logger.warning(f'[Step 2] ⚠️ 범위 부족: {total_nodes}개 < 100개 권장')
+        else:
+            logger.info(f'[Step 2] ✅ 범위 설정 완료: {total_nodes}개 노드')
         
         return list(allowed_ids)
     

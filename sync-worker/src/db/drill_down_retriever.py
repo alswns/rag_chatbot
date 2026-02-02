@@ -94,7 +94,7 @@ class GraphDrillDownRetriever:
         self,
         query: str,
         k: int = 5,
-        hub_k: int = 3,
+        hub_k: int = None,
         use_reranking: bool = False
     ) -> List[RetrievedDocument]:
         """
@@ -102,8 +102,8 @@ class GraphDrillDownRetriever:
         
         Args:
             query: 검색 쿼리
-            k: 최종 반환할 문서 개수 (원래 top_k)
-            hub_k: Step 1에서 검색할 Hub 개수
+            k: 최종 반환할 문서 개수
+            hub_k: Step 1에서 검색할 Hub 개수 (None이면 k*3, 최소 15)
             use_reranking: Cross-Encoder Reranking 사용 여부
         
         Returns:
@@ -113,16 +113,24 @@ class GraphDrillDownRetriever:
         reranker_top_k = int(os.getenv('RERANKER_TOP_K', '50'))
         candidate_k = reranker_top_k if use_reranking else k
         
-        # 디버그 로그
-        logger.info(f'🔧 DEBUG: RERANKER_TOP_K env = {os.getenv("RERANKER_TOP_K")}, parsed = {reranker_top_k}')
-        logger.info(f'🔧 DEBUG: use_reranking = {use_reranking}, k = {k}')
-        logger.info(f'🔧 DEBUG: candidate_k calculation: {reranker_top_k} if {use_reranking} else {k} = {candidate_k}')
+        # ✅ hub_k 동적 설정: 최소 15개 이상 확보
+        if hub_k is None:
+            hub_k = max(15, k * 3)
         
-        logger.info(f'🔍 드릴다운 검색 시작: "{query[:50]}..." (k={k}, candidate_k={candidate_k}, rerank={use_reranking})')
+        logger.info('=' * 70)
+        logger.info(f'🔍 드릴다운 검색 시작: "{query[:50]}..."')
+        logger.info(f'📊 파라미터 설정:')
+        logger.info(f'   - RERANKER_TOP_K (env): {os.getenv("RERANKER_TOP_K")}')
+        logger.info(f'   - k (최종 반환): {k}')
+        logger.info(f'   - candidate_k (후보): {candidate_k}')
+        logger.info(f'   - hub_k (Hub 검색): {hub_k}')
+        logger.info(f'   - use_reranking: {use_reranking}')
+        logger.info('=' * 70)
         
         # =====================================================
         # Step 1: Hub Node 식별 (Coarse Search)
         # =====================================================
+        logger.info(f'[Step 1] Hub 탐색 시작 (k={hub_k})')
         hub_nodes = self._find_hub_nodes(query, top_k=hub_k)
         
         if not hub_nodes:
@@ -156,15 +164,20 @@ class GraphDrillDownRetriever:
         results = self._scoped_search(
             query=query,
             allowed_doc_ids=allowed_doc_ids,
-            k=candidate_k,  # ✅ 후보 개수 사용
+            k=candidate_k,  # ✅ Reranking시 더 많은 후보 수집
             use_reranking=use_reranking
         )
         
-        # ✅ 최종 k개로 자르기
-        final_results = results[:k]
-        logger.info(f'[Step 3] ✓ 정밀 검색 완료: {len(final_results)}개 문서 반환 (후보 {len(results)}개에서 선택)')
-        
-        return final_results
+        # ✅ 최종 결과 반환
+        if use_reranking:
+            # Reranking 사용 시: 이미 candidate_k개로 정렬되어 반환됨
+            logger.info(f'✅ 드릴다운 검색 완료: {len(results)}개 문서 반환 (Reranking 적용)')
+            return results
+        else:
+            # Reranking 미사용 시: k개로 자르기
+            final_results = results[:k]
+            logger.info(f'✅ 드릴다운 검색 완료: {len(final_results)}개 문서 반환 (원본 {len(results)}개)')
+            return final_results
     
     def _find_hub_nodes(
         self,
@@ -393,13 +406,16 @@ class GraphDrillDownRetriever:
             # 쿼리 임베딩 생성
             query_embedding = self.vector_store.embedding_service.encode([query])[0].tolist()
             
-            # 범위 내 검색 (ChromaDB $in 필터)
-            # ✅ RERANKER_TOP_K 환경변수 활용
+            # ✅ Reranking 활성화 시 더 많은 후보 수집
             reranker_top_k = int(os.getenv('RERANKER_TOP_K', '50'))
             if use_reranking:
-                search_k = min(reranker_top_k, len(allowed_doc_ids))
+                # Reranking 시: RERANKER_TOP_K개의 후보 수집
+                search_k = min(reranker_top_k * 2, len(allowed_doc_ids), 200)
             else:
-                search_k = min(k * 4, len(allowed_doc_ids), 50)
+                # Reranking 미사용 시: k개만 검색
+                search_k = min(k, len(allowed_doc_ids))
+            
+            logger.info(f'[Step 3] 범위 내 검색: {len(allowed_doc_ids)}개 문서 중 상위 {search_k}개 후보 수집')
             
             try:
                 # 청크 ID로 직접 필터링 시도
@@ -407,7 +423,7 @@ class GraphDrillDownRetriever:
                     query_embeddings=[query_embedding],
                     n_results=search_k,
                     where={"$or": [
-                        {"document_id": {"$in": allowed_doc_ids[:50]}},
+                        {"document_id": {"$in": allowed_doc_ids[:100]}},  # ChromaDB $in 제한
                     ]}
                 )
             except Exception as filter_err:
@@ -444,16 +460,18 @@ class GraphDrillDownRetriever:
             
             # Cross-Encoder Reranking
             if use_reranking and documents:
-                logger.info(f'🔍 Reranking 시작: {len(documents)}개 문서')
+                logger.info(f'[Step 3] 🔍 Reranking 시작: {len(documents)}개 문서 → 상위 {k}개 선택')
                 reranked = self._rerank_documents(query, documents, k)
                 if reranked:
-                    logger.info(f'✅ Reranking 완료: {len(reranked)}개 문서')
-                    documents = reranked
+                    logger.info(f'[Step 3] ✅ Reranking 완료: {len(reranked)}개 문서 반환')
+                    # ✅ Reranking 결과를 그대로 반환 (이미 k개로 정렬됨)
+                    return reranked[:k]
                 else:
-                    logger.warning('⚠️ Reranking 실패 - 원본 순서 유지')
+                    logger.warning('[Step 3] ⚠️ Reranking 실패 - 원본 순서 사용')
             
-            # 상위 k개 반환
+            # Reranking 미사용 시: 점수순 정렬 후 상위 k개
             documents.sort(key=lambda x: x.score, reverse=True)
+            logger.info(f'[Step 3] ✅ 정밀 검색 완료: {len(documents[:k])}개 문서 반환 (후보 {len(documents)}개)')
             return documents[:k]
             
         except Exception as e:

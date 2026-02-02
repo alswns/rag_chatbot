@@ -34,16 +34,25 @@ class VectorSearchManager:
             if deps.drill_down_retriever is not None:
                 logger.info(f'🔍 드릴다운 검색 시작: "{query[:50]}..."')
                 
+                # ✅ Reranking 활성화 시 RERANKER_TOP_K 사용, 아니면 top_k 사용
                 search_k = RERANKER_TOP_K if ENABLE_RERANKING else top_k
+                # ✅ Hub 검색은 최종 결과의 3배 (최소 15개)
+                hub_k = max(15, search_k * 3)
+                
+                logger.info(f'📊 검색 파라미터: search_k={search_k}, hub_k={hub_k}, reranking={ENABLE_RERANKING}')
                 
                 documents = deps.drill_down_retriever.retrieve(
                     query=query,
                     k=search_k,
+                    hub_k=hub_k,
                     use_reranking=ENABLE_RERANKING
                 )
                 
                 if documents:
-                    documents = documents[:top_k]
+                    # ✅ Reranking 사용 시 이미 RERANKER_TOP_K개를 가져왔으므로 그대로 사용
+                    # Reranking 미사용 시에만 top_k로 자르기
+                    if not ENABLE_RERANKING:
+                        documents = documents[:top_k]
                     
                     # 웹 검색 판단용 결과 저장
                     VectorSearchManager._last_search_results = [

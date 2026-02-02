@@ -287,37 +287,6 @@ class WorkerAgent:
         if collected_info:
             return '\n'.join(collected_info)
         return "정보를 찾을 수 없습니다."
-                action = await self._decide_action(task.task, previous_results, collected_info)
-                
-                if action['action'] == 'finish':
-                    result = action.get('query', '정보 수집 완료')
-                    logger.info(f'  ✅ 작업 완료: {result[:50]}...')
-                    return result
-                
-                elif action['action'] == 'internal_search':
-                    logger.debug(f'  🔍 Internal Search: {action["query"]}')
-                    search_result = await internal_search_fn(action['query'])
-                    if search_result:
-                        collected_info.append(f"[내부 검색 결과]\n{search_result[:1000]}")
-                    else:
-                        collected_info.append("[내부 검색 결과] 관련 정보 없음")
-                
-                elif action['action'] == 'web_search':
-                    logger.debug(f'  🌐 Web Search: {action["query"]}')
-                    search_result = await web_search_fn(action['query'])
-                    if search_result:
-                        collected_info.append(f"[웹 검색 결과]\n{search_result[:1000]}")
-                    else:
-                        collected_info.append("[웹 검색 결과] 관련 정보 없음")
-                
-            except Exception as e:
-                logger.warning(f'  ⚠️ Step {step + 1} 실패: {str(e)}')
-                continue
-        
-        # 최대 스텝 도달
-        if collected_info:
-            return '\n'.join(collected_info)
-        return "정보를 찾을 수 없습니다."
     
     async def _decide_action(
         self,

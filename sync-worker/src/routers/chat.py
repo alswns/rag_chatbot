@@ -1,7 +1,8 @@
 """Chat completions router"""
 import logging
 import json
-from typing import Any
+import re
+from typing import Any, Dict, Optional, List
 from datetime import datetime
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -15,6 +16,70 @@ import core.dependencies as deps
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+# === 검색 재개 헬퍼 함수 ===
+def _check_search_approval(message: str) -> bool:
+    """사용자가 웹 검색을 허용했는지 확인"""
+    approval_patterns = [
+        '검색해', '찾아', '진행해', '해줘', '알아봐',
+        '네', '응', '좋아', '그래', 'yes', 'ok', '부탁',
+        '검색 해', '찾아봐', '검색해줘', '찾아줘',
+        '검색 진행', '웹 검색', '인터넷'
+    ]
+    message_lower = message.lower().strip()
+    
+    # 짧은 긍정 응답 (예: "네", "응", "해줘")
+    if len(message_lower) <= 10:
+        for pattern in approval_patterns:
+            if pattern in message_lower:
+                return True
+    
+    # 명시적 검색 요청
+    for pattern in ['검색해', '찾아', '진행해', '알아봐']:
+        if pattern in message_lower:
+            return True
+    
+    return False
+
+
+def _extract_previous_context(messages: List[ChatMessage]) -> Optional[Dict[str, Any]]:
+    """이전 대화에서 컨텍스트 추출"""
+    context = {
+        'original_query': None,
+        'internal_data': None,
+        'pending_task': None
+    }
+    
+    # 최근 메시지에서 역순으로 탐색
+    for i in range(len(messages) - 2, -1, -1):  # 마지막 메시지 제외
+        msg = messages[i]
+        
+        if msg.role == 'user' and context['original_query'] is None:
+            # 검색 허용 요청이 아닌 원래 질문 찾기
+            if not _check_search_approval(msg.content):
+                context['original_query'] = msg.content
+                logger.info(f'🔍 원래 질문 복구: {msg.content[:50]}...')
+        
+        if msg.role == 'assistant':
+            content = msg.content
+            
+            # 내부 검색 결과 추출
+            if '[내부 검색 결과]' in content or '내부 문서' in content:
+                # 내부 데이터 부분 추출
+                context['internal_data'] = content
+                logger.info(f'📄 내부 데이터 복구: {len(content)}자')
+            
+            # 검색 허용 요청 감지
+            if '웹 검색을 진행할까요' in content or '웹 검색을 승인' in content:
+                context['pending_task'] = 'web_search'
+                logger.info('⏸️ 보류된 웹 검색 작업 감지')
+    
+    # 원래 질문이 있어야 유효한 컨텍스트
+    if context['original_query']:
+        return context
+    
+    return None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -238,6 +303,17 @@ async def handle_hierarchical_agent(request: ChatCompletionRequest, user_message
     agent = get_hierarchical_agent()
     web_service = get_web_search_service()
     
+    # ✅ 검색 재개 의도 확인
+    is_search_approval = _check_search_approval(user_message)
+    previous_context = None
+    
+    if is_search_approval:
+        logger.info('🔄 웹 검색 재개 의도 감지')
+        # 이전 대화에서 컨텍스트 복구
+        previous_context = _extract_previous_context(request.messages)
+        if previous_context:
+            logger.info(f'📋 이전 컨텍스트 복구: {previous_context.get("original_query", "N/A")}')
+    
     # Internal Search Function
     async def internal_search_fn(query: str) -> str:
         return await VectorSearchManager.search(query)
@@ -259,6 +335,90 @@ async def handle_hierarchical_agent(request: ChatCompletionRequest, user_message
         """OpenAI 호환 SSE 스트림 생성 (실시간 증분)"""
         created = int(datetime.now().timestamp())
         
+        # ✅ 검색 재개 모드 처리
+        if is_search_approval and previous_context:
+            async for event in agent.resume_with_web_search(
+                previous_context=previous_context,
+                internal_search_fn=internal_search_fn,
+                web_search_fn=web_search_fn
+            ):
+                if event["type"] == "thinking_start":
+                    chunk = {
+                        "id": f"chatcmpl-{created}",
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": MODEL_NAME,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "content": "\n\n<details open>\n<summary>thought: 검색 재개 중...</summary>\n\n"
+                            },
+                            "finish_reason": None
+                        }]
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                elif event["type"] == "thinking":
+                    chunk = {
+                        "id": f"chatcmpl-{created}",
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": MODEL_NAME,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": event["content"]},
+                            "finish_reason": None
+                        }]
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                elif event["type"] == "thinking_end":
+                    chunk = {
+                        "id": f"chatcmpl-{created}",
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": MODEL_NAME,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": "\n\n</details>\n\n---\n\n"},
+                            "finish_reason": None
+                        }]
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                elif event["type"] == "result":
+                    content = event["content"]
+                    chunk_size = 50
+                    for i in range(0, len(content), chunk_size):
+                        text_chunk = content[i:i+chunk_size]
+                        chunk = {
+                            "id": f"chatcmpl-{created}",
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": MODEL_NAME,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"content": text_chunk},
+                                "finish_reason": None
+                            }]
+                        }
+                        yield f"data: {json.dumps(chunk)}\n\n"
+            
+            # 종료 청크
+            final_chunk = {
+                "id": f"chatcmpl-{created}",
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": MODEL_NAME,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop"
+                }]
+            }
+            yield f"data: {json.dumps(final_chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        
+        # 일반 모드
         async for event in agent.run(user_message, internal_search_fn, web_search_fn):
             if event["type"] == "thinking_start":
                 # details 태그 시작 (빈 줄 포함)

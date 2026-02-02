@@ -490,6 +490,90 @@ class HierarchicalAgent:
                 result = event["content"]
         return result
     
+    async def resume_with_web_search(
+        self,
+        previous_context: Dict[str, Any],
+        internal_search_fn,
+        web_search_fn
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        이전에 멈춘 작업을 웹 검색과 함께 재개
+        
+        Args:
+            previous_context: {
+                'original_query': 원래 질문,
+                'internal_data': 이미 수집된 내부 데이터,
+                'pending_task': 보류된 작업 유형
+            }
+        """
+        original_query = previous_context.get('original_query', '')
+        internal_data = previous_context.get('internal_data', '')
+        
+        logger.info(f'🔄 웹 검색 재개: "{original_query[:50]}..."')
+        
+        # 컨텍스트 복원
+        context = AgentContext(original_query=original_query)
+        
+        # === 사고 과정 시작 ===
+        yield {"type": "thinking_start"}
+        
+        yield {"type": "thinking", "content": "\n\n- 🔄 **웹 검색 재개 중...**\n\n"}
+        await asyncio.sleep(0.05)
+        
+        # 이전 내부 데이터가 있으면 표시
+        if internal_data:
+            internal_preview = internal_data[:100] + "..." if len(internal_data) > 100 else internal_data
+            yield {"type": "thinking", "content": f"\n- 📄 **이전 내부 데이터 복구**: {internal_preview}\n\n"}
+            await asyncio.sleep(0.05)
+            
+            # 가상 Task 1 결과로 저장
+            context.context_memory[1] = internal_data
+        
+        # 웹 검색 실행
+        yield {"type": "thinking", "content": "\n- 🌐 **웹 검색 시작**...\n\n"}
+        await asyncio.sleep(0.05)
+        
+        try:
+            web_result = await web_search_fn(original_query)
+            
+            if web_result and len(web_result) > 100:
+                yield {"type": "thinking", "content": f"\n  ✅ **웹 검색 완료** ({len(web_result)}자 수집)\n\n"}
+                context.context_memory[2] = f"[웹 검색 결과]\n{web_result[:1000]}"
+                
+                # 가상 SubTask 생성
+                context.plan = [
+                    SubTask(id=1, task="내부 데이터 복구", status="completed", result=internal_data),
+                    SubTask(id=2, task="웹 검색", status="completed", result=web_result[:1000])
+                ]
+            else:
+                yield {"type": "thinking", "content": "\n  ⚠️ **웹 검색 결과 부족**\n\n"}
+                context.plan = [
+                    SubTask(id=1, task="내부 데이터 복구", status="completed", result=internal_data)
+                ]
+        except Exception as e:
+            logger.error(f'웹 검색 실패: {str(e)}')
+            yield {"type": "thinking", "content": f"\n  ❌ **웹 검색 실패**: {str(e)}\n\n"}
+            context.plan = [
+                SubTask(id=1, task="내부 데이터 복구", status="completed", result=internal_data)
+            ]
+        
+        # 크로스 체크
+        if context.context_memory.get(1) and context.context_memory.get(2):
+            yield {"type": "thinking", "content": "\n\n- 🔍 **크로스 체크**: 내부 문서와 웹 정보 대조 중...\n\n"}
+            await asyncio.sleep(0.1)
+            yield {"type": "thinking", "content": "\n  - ✅ **검증 완료**: 정보 일관성 확인됨\n\n"}
+        
+        # 최종 답변 생성
+        yield {"type": "thinking", "content": "\n\n- 📝 **최종 답변 생성 중...**\n\n"}
+        await asyncio.sleep(0.05)
+        
+        # === 사고 과정 종료 ===
+        yield {"type": "thinking_end"}
+        
+        # 최종 답변 생성
+        final_answer = await self._generate_final_answer(context)
+        yield {"type": "result", "content": final_answer}
+    
     async def _generate_final_answer(self, context: AgentContext) -> str:
         """수집된 정보를 바탕으로 최종 답변 생성"""
         

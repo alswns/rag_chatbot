@@ -353,18 +353,6 @@ async def handle_hierarchical_agent(request: ChatCompletionRequest, user_message
                     }]
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
-                    "id": f"chatcmpl-{created}",
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": MODEL_NAME,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {"content": "\n</details>\n\n---\n\n"},
-                        "finish_reason": None
-                    }]
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
-                details_opened = False
             
             elif event["type"] == "result":
                 # 최종 답변

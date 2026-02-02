@@ -425,7 +425,10 @@ class HierarchicalAgent:
             task.result = result
             task.status = "completed"
             context.context_memory[task.id] = result
-              ✅ **완료**: {result_preview}\n"}
+            
+            # 작업 완료
+            result_preview = result[:80] + "..." if len(result) > 80 else result
+            yield {"type": "thinking", "content": f"  ✅ **완료**: {result_preview}\n"}
             await asyncio.sleep(0.05)
         
         # === Step 4: Cross-Check ===
@@ -452,10 +455,7 @@ class HierarchicalAgent:
         yield {"type": "thinking_end"}
         
         final_answer = await self._generate_final_answer(context)
-        yield {"type": "result", "content": permission_message}
-        else:
-            final_answer = await self._generate_final_answer(context)
-            yield {"type": "result", "content": final_answer}
+        yield {"type": "result", "content": final_answer}
     
     def _check_search_permission(self, query: str) -> bool:
         """검색 허용 키워드 체크"""

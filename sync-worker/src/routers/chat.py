@@ -1,5 +1,6 @@
 """Chat completions router"""
 import logging
+import json
 from typing import Any
 from datetime import datetime
 from fastapi import APIRouter, HTTPException
@@ -14,6 +15,37 @@ import core.dependencies as deps
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+class ChatCompletionRequest(BaseModel):
+    model: str = Field(default=MODEL_NAME)
+    messages: list[ChatMessage]
+    temperature: float = Field(default=0.1, ge=0.0, le=2.0)
+    top_p: float = Field(default=0.95, ge=0.0, le=1.0)
+    max_tokens: int | None = Field(default=2048)
+    stream: bool = Field(default=False)
+
+
+def is_complex_query(query: str) -> bool:
+    """복합 질문 여부 판단"""
+    # 복합 질문 패턴
+    complex_patterns = [
+        '그리고', '또한', '그 다음', '이어서',
+        '비교', '차이', '각각',
+        '~와 ~', '~랑 ~',
+        '총장', '학장', '대표', '창업자',  # 2단계 정보 필요
+        '의 ~는', '의 ~가',  # 소유격 체인
+    ]
+    
+    for pattern in complex_patterns:
+        if pattern in query:
+            return True
+    
+    # 접속사로 연결된 질문
+    if query.count('?') > 1:
+        return True
+    
+    return False
 
 
 class ChatCompletionRequest(BaseModel):
@@ -60,8 +92,12 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
                 {'role': 'system', 'content': 'You are a helpful assistant.'},
                 {'role': 'user', 'content': user_message}
             ]
+        # 복합 질문 감지 → Hierarchical Agent 사용
+        elif is_complex_query(user_message) and request.stream:
+            logger.info('🧠 복합 질문 감지 → Hierarchical Agent 실행')
+            return await handle_hierarchical_agent(request, user_message)
         else:
-            # RAG 검색
+            # 단순 질문 → 기존 RAG 파이프라인
             logger.info('Step 1: RAG 검색...')
             context = await VectorSearchManager.search(user_message)
             logger.info(f'검색 완료: {len(context)}자')
@@ -191,3 +227,98 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
     except Exception as e:
         logger.error(f'❌ 처리 오류: {str(e)}', exc_info=True)
         raise HTTPException(status_code=500, detail=f'처리 실패: {str(e)}')
+
+
+# === Hierarchical Agent Handler ===
+async def handle_hierarchical_agent(request: ChatCompletionRequest, user_message: str):
+    """복합 질문을 Hierarchical Agent로 처리 (스트리밍)"""
+    from managers.hierarchical_agent import get_hierarchical_agent
+    from utils.web_search import get_web_search_service
+    
+    agent = get_hierarchical_agent()
+    web_service = get_web_search_service()
+    
+    # Internal Search Function
+    async def internal_search_fn(query: str) -> str:
+        return await VectorSearchManager.search(query)
+    
+    # Web Search Function
+    async def web_search_fn(query: str) -> str:
+        # 대화 히스토리 준비
+        history = [{'role': msg.role, 'content': msg.content} 
+                   for msg in request.messages[-6:] if msg.role in ['user', 'assistant']]
+        
+        return await web_service.search_if_needed(
+            user_query=query,
+            internal_context="",
+            force_search=True,
+            history=history
+        )
+    
+    async def generate_stream():
+        """OpenAI 호환 SSE 스트림 생성"""
+        created = int(datetime.now().timestamp())
+        
+        async for event in agent.run(user_message, internal_search_fn, web_search_fn):
+            if event["type"] == "thinking":
+                # OpenWebUI 호환 thinking 메시지
+                # <details> 태그로 접을 수 있는 진행 상황 표시
+                thinking_content = event["content"]
+                
+                chunk = {
+                    "id": f"chatcmpl-{created}",
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": MODEL_NAME,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": f"<details open><summary>🤔 {event.get('step', 'thinking')}</summary>\n\n{thinking_content}\n\n</details>\n\n"
+                        },
+                        "finish_reason": None
+                    }]
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+            
+            elif event["type"] == "result":
+                # 최종 답변
+                content = event["content"]
+                
+                # 청크 단위로 스트리밍
+                chunk_size = 50
+                for i in range(0, len(content), chunk_size):
+                    text_chunk = content[i:i+chunk_size]
+                    chunk = {
+                        "id": f"chatcmpl-{created}",
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": MODEL_NAME,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": text_chunk},
+                            "finish_reason": None
+                        }]
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
+        
+        # 종료 청크
+        final_chunk = {
+            "id": f"chatcmpl-{created}",
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": MODEL_NAME,
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }]
+        }
+        yield f"data: {json.dumps(final_chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+    
+    logger.info('🧠 Hierarchical Agent 스트리밍 응답 시작')
+    return StreamingResponse(
+        generate_stream(),
+        media_type='text/event-stream'
+    )

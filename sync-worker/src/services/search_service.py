@@ -3,7 +3,11 @@ import logging
 import asyncio
 import os
 from typing import List, Dict, Any, Optional
-from core.config import SEARCH_TOP_K, ENABLE_RERANKING, RERANKER_TOP_K
+from core.config import (
+    SEARCH_TOP_K, ENABLE_RERANKING, RERANKER_TOP_K,
+    ENABLE_QUERY_EXPANSION, ENABLE_MULTI_PATH, FUSION_METHOD,
+    ENABLE_WEB_SEARCH, ENABLE_WEB_QUERY_EXPANSION
+)
 import core.dependencies as deps
 from utils.query_expansion import MultiQueryExpander
 from utils.result_fusion import ResultFusionManager
@@ -16,10 +20,12 @@ class VectorSearchManager:
     
     _last_search_results: List[Dict[str, Any]] = []
     
-    # Query Expansion 설정
-    ENABLE_QUERY_EXPANSION = os.getenv('ENABLE_QUERY_EXPANSION', 'true').lower() == 'true'
-    ENABLE_MULTI_PATH = os.getenv('ENABLE_MULTI_PATH', 'true').lower() == 'true'
-    FUSION_METHOD = os.getenv('FUSION_METHOD', 'rrf')  # 'rrf' 또는 'score_sum'
+    # 설정값 (config.py에서 읽음)
+    ENABLE_QUERY_EXPANSION = ENABLE_QUERY_EXPANSION
+    ENABLE_MULTI_PATH = ENABLE_MULTI_PATH
+    FUSION_METHOD = FUSION_METHOD
+    ENABLE_WEB_SEARCH = ENABLE_WEB_SEARCH
+    ENABLE_WEB_QUERY_EXPANSION = ENABLE_WEB_QUERY_EXPANSION
     
     @staticmethod
     def _search_sync(query: str, top_k: int = SEARCH_TOP_K) -> str:

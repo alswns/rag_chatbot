@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from managers.token_manager import TokenManager, ChatMessage
 from managers.qa_manager import QuestionAnsweringManager
 from services.search_service import VectorSearchManager
-from core.config import MAX_CONTEXT_TOKENS, MAX_MODEL_LEN, MODEL_NAME
+from core.config import MAX_CONTEXT_TOKENS, MAX_MODEL_LEN, MODEL_NAME, ENABLE_WEB_SEARCH
 import core.dependencies as deps
 
 logger = logging.getLogger(__name__)
@@ -66,42 +66,45 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
             context = await VectorSearchManager.search(user_message)
             logger.info(f'검색 완료: {len(context)}자')
             
-            # 조건부 웹 검색
+            # 조건부 웹 검색 (설정 기반)
             web_context = ""
             
-            # ✅ Pre-check: 내부 검색 품질 평가 (문서 길이만 확인)
-            force_web_search = False
-            context_length = len(context)
-            
-            # 문서 길이 기반 판단만 유지 (유사도 판단 제거)
-            if context_length == 0:
-                logger.info('🔍 Pre-check: 내부 문서 없음 → 강제 웹 검색')
-                force_web_search = True
-            elif context_length < 200:
-                logger.info(f'🔍 Pre-check: 내부 문서 부족 ({context_length}자 < 200자) → 강제 웹 검색')
-                force_web_search = True
+            if not ENABLE_WEB_SEARCH:
+                logger.info('⚠️ 웹 검색 비활성화')
             else:
-                logger.info(f'✅ Pre-check: 내부 문서 충분 ({context_length}자) → LLM 판단 요청')
-            
-            try:
-                from utils.web_search import get_web_search_service
+                # ✅ Pre-check: 내부 검색 품질 평가 (문서 길이만 확인)
+                force_web_search = False
+                context_length = len(context)
                 
-                web_service = get_web_search_service()
-                
-                # 웹 검색 수행 (force_search 플래그 전달)
-                web_context = await web_service.search_if_needed(
-                    user_query=user_message,
-                    internal_context=context,
-                    force_search=force_web_search
-                )
-                
-                if web_context:
-                    logger.info(f'🌐 웹 검색 결과 획득: {len(web_context)}자')
+                # 문서 길이 기반 판단만 유지 (유사도 판단 제거)
+                if context_length == 0:
+                    logger.info('🔍 Pre-check: 내부 문서 없음 → 강제 웹 검색')
+                    force_web_search = True
+                elif context_length < 200:
+                    logger.info(f'🔍 Pre-check: 내부 문서 부족 ({context_length}자 < 200자) → 강제 웹 검색')
+                    force_web_search = True
                 else:
-                    logger.info('ℹ️  웹 검색 스킵')
+                    logger.info(f'✅ Pre-check: 내부 문서 충분 ({context_length}자) → LLM 판단 요청')
+                
+                try:
+                    from utils.web_search import get_web_search_service
                     
-            except Exception as e:
-                logger.error(f'❌ 웹 검색 실패: {str(e)}')
+                    web_service = get_web_search_service()
+                    
+                    # 웹 검색 수행 (force_search 플래그 전달)
+                    web_context = await web_service.search_if_needed(
+                        user_query=user_message,
+                        internal_context=context,
+                        force_search=force_web_search
+                    )
+                    
+                    if web_context:
+                        logger.info(f'🌐 웹 검색 결과 획득: {len(web_context)}자')
+                    else:
+                        logger.info('ℹ️  웹 검색 스킵')
+                        
+                except Exception as e:
+                    logger.error(f'❌ 웹 검색 실패: {str(e)}')
             
             # Intent 분류
             detected_intent = 'explanation'

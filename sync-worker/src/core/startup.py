@@ -5,7 +5,9 @@ import time
 import openai
 from core.config import (
     VLLM_API_URL, CHROMA_HOST, CHROMA_PORT, GRAPH_PERSIST_PATH,
-    ENABLE_RERANKING, RERANKER_MODEL, MODEL_NAME
+    ENABLE_RERANKING, RERANKER_MODEL, MODEL_NAME,
+    ENABLE_QUERY_EXPANSION, ENABLE_MULTI_PATH, FUSION_METHOD,
+    ENABLE_WEB_SEARCH, ENABLE_INTELLIGENT_CHUNKING, CHUNK_SIZE, CHUNK_OVERLAP
 )
 import core.dependencies as deps
 
@@ -128,6 +130,33 @@ async def initialize_app():
     
     logger.info('=' * 70)
     logger.info(f'   - vLLM: {"✅" if vllm_ready else "❌"}')
+    logger.info('=' * 70)
+    
+    # ✅ 지능형 검색 기능 요약
+    logger.info('=' * 70)
+    logger.info('📊 활성화된 고급 기능:')
+    logger.info('=' * 70)
+    
+    # Query Expansion & Multi-path
+    logger.info('🔍 Intelligent Retrieval:')
+    logger.info(f'   - Query Expansion: {"✅" if ENABLE_QUERY_EXPANSION else "❌"}')
+    logger.info(f'   - Multi-path Drill-down: {"✅" if ENABLE_MULTI_PATH else "❌"}')
+    logger.info(f'   - Result Fusion: {FUSION_METHOD.upper()}')
+    
+    # Web Search
+    logger.info('🌐 Web Search:')
+    logger.info(f'   - Enabled: {"✅" if ENABLE_WEB_SEARCH else "❌"}')
+    
+    # Intelligent Chunking
+    logger.info('🔬 Data Processing:')
+    logger.info(f'   - Intelligent Chunking: {"✅" if ENABLE_INTELLIGENT_CHUNKING else "❌"}')
+    if ENABLE_INTELLIGENT_CHUNKING:
+        logger.info(f'      • Chunk Size: {CHUNK_SIZE}자 (Overlap: {CHUNK_OVERLAP}자)')
+        logger.info(f'      • Features: Metadata Extraction + Keyword + Metadata Header')
+    
+    # Reranking
+    logger.info(f'   - Reranking: {"✅" if ENABLE_RERANKING else "❌"}')
+    
     logger.info('=' * 70)
 
 

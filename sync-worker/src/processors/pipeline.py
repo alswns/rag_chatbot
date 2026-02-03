@@ -62,10 +62,24 @@ class GraphRAGPipeline:
         
         # ✅ ChunkingProcessor 추가 (문서 → 청크 분할)
         from processors.chunking import ChunkingProcessor
+        from processors.intelligent_chunking_adapter import IntelligentChunkingAdapter
+        from core.config import ENABLE_INTELLIGENT_CHUNKING
+        
         self.chunking_processor: ChunkingProcessor = ChunkingProcessor(
-            # markdown_chunk_size=max_chunk_tokens,
-            # recursive_chunk_size=max_chunk_tokens // 2
+            recursive_chunk_size=os.getenv('CHUNK_SIZE', 900),
+            recursive_chunk_overlap=os.getenv('CHUNK_OVERLAP', 200)
         )
+        
+        # ✅ Intelligent Chunking 어댑터 (메타데이터 추출 + 키워드)
+        self.intelligent_chunking_adapter: Optional[IntelligentChunkingAdapter] = None
+        if ENABLE_INTELLIGENT_CHUNKING:
+            self.intelligent_chunking_adapter = IntelligentChunkingAdapter(
+                chunk_size=int(os.getenv('CHUNK_SIZE', '900')),
+                chunk_overlap=int(os.getenv('CHUNK_OVERLAP', '200'))
+            )
+            logger.info('✅ Intelligent Chunking 활성화')
+        else:
+            logger.info('⚠️ 기본 Chunking 사용 (Intelligent Chunking 비활성화)')
         
         self.processor: GraphRAGProcessor = GraphRAGProcessor(
             embedding_model=os.getenv('EMBEDDING_MODEL', 'BAAI/bge-m3'),
@@ -189,14 +203,30 @@ class GraphRAGPipeline:
                         page_map=page_map
                     )
                     
-                    # 2-1. 문서를 청크로 분할 (부모 경로 전달)
-                    chunks = self.chunking_processor.process_notion_page(
-                        page_id=page_id,
-                        title=document.get('title', 'Untitled'),
-                        content=document.get('content', ''),
-                        last_edited_time=document.get('updated_at', ''),
-                        breadcrumb_path=breadcrumb_path  # ✅ 부모 경로 전달
-                    )
+                    # 2-1. 문서를 청크로 분할 (Intelligent Chunking 사용 또는 기본)
+                    if self.intelligent_chunking_adapter is not None:
+                        # ✅ Intelligent Chunking: 메타데이터 보강 + Metadata Header 삽입
+                        logger.info(f'🔬 Intelligent Chunking: {document.get("title")[:30]}...')
+                        
+                        intelligent_chunks = self.intelligent_chunking_adapter.process_notion_page_with_enrichment(
+                            page_id=page_id,
+                            title=document.get('title', 'Untitled'),
+                            content=document.get('content', ''),
+                            last_edited_time=document.get('updated_at', ''),
+                            breadcrumb_path=breadcrumb_path,
+                            parent_id=document.get('parent_id'),
+                            url=document.get('url', '')
+                        )
+                        chunks = intelligent_chunks
+                    else:
+                        # 기본 청킹: 기존 로직 사용
+                        chunks = self.chunking_processor.process_notion_page(
+                            page_id=page_id,
+                            title=document.get('title', 'Untitled'),
+                            content=document.get('content', ''),
+                            last_edited_time=document.get('updated_at', ''),
+                            breadcrumb_path=breadcrumb_path
+                        )
                     
                     if not chunks:
                         logger.debug(f'청크 없음 (빈 문서): {document.get("title")}')
@@ -223,12 +253,23 @@ class GraphRAGPipeline:
                     
                     # 2-3. 각 청크를 버퍼에 추가
                     for chunk_idx, chunk in enumerate(chunks):
-                        chunk_content = chunk.get('content', '')
-                        chunk_metadata = chunk.get('metadata', {})
+                        # Intelligent Chunking 결과인지 확인
+                        if isinstance(chunk, dict) and 'content' in chunk:
+                            # Intelligent Chunking 형식 (formatted_content + metadata)
+                            chunk_content = chunk.get('content', '')
+                            chunk_metadata = chunk.get('metadata', {})
+                            
+                            # Metadata Header가 포함된 포맷된 콘텐츠 사용 (임베딩 시 메타데이터도 함께)
+                            chunk_text = chunk.get('formatted_content', chunk_content)
+                        else:
+                            # 기본 청킹 형식
+                            chunk_content = chunk.get('content', '')
+                            chunk_metadata = chunk.get('metadata', {})
+                            chunk_text = chunk_content
                         
                         chroma_doc = {
                             'id': f"{document.get('id')}_chunk_{chunk_idx}",
-                            'content': chunk_content,
+                            'content': chunk_text,  # Metadata Header 포함
                             'metadata': self._sanitize_metadata({
                                 'title': chunk_metadata.get('title', document.get('title', 'Untitled')),
                                 'source_url': document.get('url', ''),
@@ -240,7 +281,16 @@ class GraphRAGPipeline:
                                 'source': 'notion',
                                 'parent_id': document.get('parent_id'),
                                 'header_1': chunk_metadata.get('header_1', ''),
-                                'header_2': chunk_metadata.get('header_2', '')
+                                'header_2': chunk_metadata.get('header_2', ''),
+                                
+                                # ✅ Intelligent Chunking 메타데이터
+                                'breadcrumb_path': chunk_metadata.get('breadcrumb_path', ''),
+                                'document_type': chunk_metadata.get('document_type', ''),
+                                'subject': chunk_metadata.get('subject', ''),
+                                'keywords': chunk_metadata.get('keywords', ''),
+                                'temporal_info': chunk_metadata.get('temporal_info', ''),
+                                'entities': chunk_metadata.get('entities', ''),
+                                'local_keywords': str(chunk_metadata.get('local_keywords', []))
                             })
                         }
                         batch_buffer.append(chroma_doc)

@@ -5,7 +5,7 @@ import torch
 from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
-
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 class EmbeddingService:
     """싱글톤 임베딩 서비스"""
@@ -33,7 +33,7 @@ class EmbeddingService:
                 # self._model = SentenceTransformer(model_name)
                 self._model = SentenceTransformer(
                     model_name,
-                    device='cuda',
+                    device=DEVICE,
                     model_kwargs={"torch_dtype": torch.float16} # FP16으로 메모리 50% 절감
                 )
                 logger.info(f'✅ 임베딩 모델 로드 완료: {model_name}')

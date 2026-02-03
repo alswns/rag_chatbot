@@ -18,7 +18,7 @@ import re
 import networkx as nx
 
 logger = logging.getLogger(__name__)
-
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 # BGE Reranker 싱글톤 (한국어 성능 우수)
 _reranker = None
 
@@ -40,7 +40,7 @@ def get_reranker():
             _reranker = CrossEncoder(
                 model_name, 
                 max_length=512, 
-                device='cuda',
+                device=DEVICE,
                 automodel_args={"torch_dtype": torch.float16} # FP16 적용
             )
             logger.info(f'✅ BGE Reranker 로드 완료')

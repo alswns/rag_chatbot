@@ -17,6 +17,7 @@ import logging
 from typing import List, Dict, Any, Optional, Set, Tuple
 from dataclasses import dataclass
 import networkx as nx
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -95,30 +96,27 @@ class GraphDrillDownRetriever:
         query: str,
         k: int = 5,
         hub_k: int = 3,
-        use_reranking: bool = False
+        use_reranking: bool = False,
+        use_multi_path: bool = True
     ) -> List[RetrievedDocument]:
         """
-        3단계 드릴다운 검색 수행
+        3단계 드릴다운 검색 수행 + 멀티패스 확장
         
         Args:
             query: 검색 쿼리
             k: 최종 반환할 문서 개수 (원래 top_k)
-            hub_k: Step 1에서 검색할 Hub 개수
+            hub_k: Step 1에서 검색할 Hub 개수 (멀티패스: 상위 3개 모두 탐색)
             use_reranking: Cross-Encoder Reranking 사용 여부
+            use_multi_path: 멀티패스 탐색 활성화 (Top-3 허브 동시 탐색)
         
         Returns:
-            검색된 문서 리스트
+            검색된 문서 리스트 (중복 제거, 리랭킹 완료)
         """
         # ✅ Reranking 사용시 후보 개수 확장
         reranker_top_k = int(os.getenv('RERANKER_TOP_K', '50'))
         candidate_k = reranker_top_k if use_reranking else k
         
-        # 디버그 로그
-        logger.info(f'🔧 DEBUG: RERANKER_TOP_K env = {os.getenv("RERANKER_TOP_K")}, parsed = {reranker_top_k}')
-        logger.info(f'🔧 DEBUG: use_reranking = {use_reranking}, k = {k}')
-        logger.info(f'🔧 DEBUG: candidate_k calculation: {reranker_top_k} if {use_reranking} else {k} = {candidate_k}')
-        
-        logger.info(f'🔍 드릴다운 검색 시작: "{query[:50]}..." (k={k}, candidate_k={candidate_k}, rerank={use_reranking})')
+        logger.info(f'🔍 드릴다운 검색 시작: "{query[:50]}..." (k={k}, multi_path={use_multi_path}, rerank={use_reranking})')
         
         # =====================================================
         # Step 1: Hub Node 식별 (Coarse Search)
@@ -130,41 +128,162 @@ class GraphDrillDownRetriever:
             return self._global_search(query, k, candidate_k, use_reranking)
         
         best_hub = hub_nodes[0]
-        logger.info(f'[Step 1] ✓ Hub 식별: "{best_hub["title"]}" (score={best_hub["score"]:.3f})')
+        logger.info(f'[Step 1] ✓ Hub 식별: 상위 {len(hub_nodes)}개 허브 발견')
+        logger.info(f'   - 최우선: "{best_hub["title"]}" (score={best_hub["score"]:.3f})')
         
         # 점수가 임계값 미달이면 전역 검색
         if best_hub['score'] < self.hub_score_threshold:
             logger.warning(f'[Step 1] Hub 점수 미달 ({best_hub["score"]:.3f} < {self.hub_score_threshold})')
-            logger.warning(f'[Step 1] 발견된 Hub 목록: {[(h["title"], h["score"]) for h in hub_nodes]}')
             logger.warning(f'[Step 1] → 전역 검색으로 전환')
             return self._global_search(query, k, candidate_k, use_reranking)
         
         # =====================================================
-        # Step 2: 그래프 확장 및 범위 설정 (Scope Expansion)
+        # Step 2: 멀티패스 또는 단일패스 선택 (Scope Expansion)
         # =====================================================
-        allowed_doc_ids = self._expand_scope(best_hub['node_id'])
-        
-        if not allowed_doc_ids:
-            logger.warning('[Step 2] 확장된 범위 없음 → 전역 검색으로 전환')
-            return self._global_search(query, k, candidate_k, use_reranking)
-        
-        logger.info(f'[Step 2] ✓ 범위 설정: {len(allowed_doc_ids)}개 노드')
-        
-        # =====================================================
-        # Step 3: 범위 내 정밀 검색 (Scoped Vector Search)
-        # =====================================================
-        results = self._scoped_search(
-            query=query,
-            allowed_doc_ids=allowed_doc_ids,
-            k=candidate_k,  # ✅ 후보 개수 사용
-            use_reranking=use_reranking
-        )
+        if use_multi_path and len(hub_nodes) > 1:
+            logger.info('[Step 2] 🔄 멀티패스 모드: 상위 3개 허브 병렬 탐색')
+            all_documents = self._retrieve_multi_path(
+                query=query,
+                hub_nodes=hub_nodes[:3],  # Top-3 허브만 선택
+                k=candidate_k,
+                use_reranking=use_reranking
+            )
+        else:
+            logger.info('[Step 2] 📍 단일패스 모드: 최우선 허브만 탐색')
+            allowed_doc_ids = self._expand_scope(best_hub['node_id'])
+            
+            if not allowed_doc_ids:
+                logger.warning('[Step 2] 확장된 범위 없음 → 전역 검색으로 전환')
+                return self._global_search(query, k, candidate_k, use_reranking)
+            
+            logger.info(f'[Step 2] ✓ 범위 설정: {len(allowed_doc_ids)}개 노드')
+            
+            # Step 3: 범위 내 정밀 검색
+            all_documents = self._scoped_search(
+                query=query,
+                allowed_doc_ids=allowed_doc_ids,
+                k=candidate_k,
+                use_reranking=use_reranking
+            )
         
         # ✅ 최종 k개로 자르기
-        final_results = results[:k]
-        logger.info(f'[Step 3] ✓ 정밀 검색 완료: {len(final_results)}개 문서 반환 (후보 {len(results)}개에서 선택)')
+        final_results = all_documents[:k]
+        logger.info(f'[Step 3] ✓ 검색 완료: {len(final_results)}개 문서 반환 (후보 {len(all_documents)}개에서 선택)')
         
         return final_results
+    
+    def _retrieve_multi_path(
+        self,
+        query: str,
+        hub_nodes: List[Dict],
+        k: int,
+        use_reranking: bool
+    ) -> List[RetrievedDocument]:
+        """
+        멀티패스 드릴다운: 상위 N개 허브 병렬 탐색
+        
+        Step 1: 상위 N개(보통 3개)의 허브 선택
+        Step 2: 각 허브 아래 자식 노드(descendants) 병렬 수집
+        Step 3: 모든 경로의 청크를 합친 후 글로벌 리랭킹
+        
+        Args:
+            query: 검색 쿼리
+            hub_nodes: 상위 허브 노드 리스트 (이미 점수 정렬됨)
+            k: 최종 반환 문서 개수
+            use_reranking: Reranking 적용 여부
+        
+        Returns:
+            중복 제거 + 리랭킹된 문서 리스트
+        """
+        try:
+            # =====================================================
+            # Step 2: 각 허브별 범위 수집 (병렬)
+            # =====================================================
+            logger.info(f'[Multi-Path Step 2] {len(hub_nodes)}개 허브에서 범위 수집 시작')
+            
+            all_allowed_ids: Dict[str, List[str]] = {}  # hub_id -> [allowed_doc_ids]
+            
+            for hub in hub_nodes:
+                hub_id = hub['node_id']
+                allowed_ids = self._expand_scope(hub_id)
+                all_allowed_ids[hub_id] = allowed_ids
+                logger.info(f'   - Hub "{hub["title"]}": {len(allowed_ids)}개 범위')
+            
+            # =====================================================
+            # Step 3: 멀티패스 검색 (Merge + Global Reranking)
+            # =====================================================
+            logger.info('[Multi-Path Step 3] 멀티패스 검색 수행')
+            
+            # 모든 경로에서 수집한 청크들을 병합
+            all_documents = []
+            doc_ids_seen: Set[str] = set()
+            
+            for hub in hub_nodes:
+                hub_id = hub['node_id']
+                allowed_ids = all_allowed_ids[hub_id]
+                
+                if not allowed_ids:
+                    continue
+                
+                # 각 경로에서 검색
+                path_documents = self._scoped_search(
+                    query=query,
+                    allowed_doc_ids=allowed_ids,
+                    k=k * 2,  # 각 경로에서 더 많이 수집 (나중에 병합 후 선택)
+                    use_reranking=False  # 개별 리랭킹 스킵 (글로벌 리랭킹에서 수행)
+                )
+                
+                # 중복 제거 (document_id 기준)
+                for doc in path_documents:
+                    doc_id = doc.metadata.get('document_id', doc.id)
+                    if doc_id not in doc_ids_seen:
+                        doc_ids_seen.add(doc_id)
+                        doc.source_step = f'multi_path_{hub["title"]}'
+                        all_documents.append(doc)
+            
+            logger.info(f'[Multi-Path Step 3] 멀티패스 수집 완료: {len(all_documents)}개 청크')
+            
+            # =====================================================
+            # Step 4: 글로벌 리랭킹 (Global Reranking)
+            # =====================================================
+            if use_reranking and all_documents:
+                logger.info(f'🔍 글로벌 리랭킹: {len(all_documents)}개 문서')
+                reranked = self._rerank_documents(query, all_documents, k)
+                return reranked if reranked else all_documents[:k]
+            else:
+                # 점수 기준 정렬 후 반환
+                all_documents.sort(key=lambda x: x.score, reverse=True)
+                return all_documents[:k]
+            
+        except Exception as e:
+            logger.error(f'멀티패스 검색 실패: {str(e)}', exc_info=True)
+            # Fallback: 첫 번째 허브로만 검색
+            if hub_nodes:
+                return self._retrieve_single_hub(query, hub_nodes[0], k, use_reranking)
+            return []
+    
+    def _retrieve_single_hub(
+        self,
+        query: str,
+        hub: Dict,
+        k: int,
+        use_reranking: bool
+    ) -> List[RetrievedDocument]:
+        """
+        단일 허브 검색 (멀티패스 Fallback 또는 단일패스 모드)
+        """
+        allowed_doc_ids = self._expand_scope(hub['node_id'])
+        
+        if not allowed_doc_ids:
+            logger.warning(f'[Fallback] 허브 "{hub["title"]}" 범위 없음')
+            return []
+        
+        return self._scoped_search(
+            query=query,
+            allowed_doc_ids=allowed_doc_ids,
+            k=k,
+            use_reranking=use_reranking
+        )
     
     def _find_hub_nodes(
         self,

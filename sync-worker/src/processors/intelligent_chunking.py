@@ -273,6 +273,7 @@ class IntelligentChunkingEngine:
         
         current_chunk = ""
         chunk_count = 0
+        total_offset = 0  # 누적 오프셋 추적
         
         for para in paragraphs:
             # 너무 긴 문단은 문장 단위로 재분할
@@ -292,9 +293,10 @@ class IntelligentChunkingEngine:
                         'chunk_id': f"{metadata.get('document_id', 'doc')}_{chunk_count}",
                         'text': current_chunk.strip(),
                         'length': len(current_chunk),
-                        'offset': len('\n\n'.join(chunks))
+                        'offset': total_offset
                     }
                     chunks.append(chunk_data)
+                    total_offset += len(current_chunk) + 2  # '\n\n' 포함
                     chunk_count += 1
                 
                 # 오버랩 처리: 이전 청크의 마지막 부분 + 새 문단
@@ -307,7 +309,7 @@ class IntelligentChunkingEngine:
                 'chunk_id': f"{metadata.get('document_id', 'doc')}_{chunk_count}",
                 'text': current_chunk.strip(),
                 'length': len(current_chunk),
-                'offset': len('\n\n'.join(chunks))
+                'offset': total_offset
             }
             chunks.append(chunk_data)
         

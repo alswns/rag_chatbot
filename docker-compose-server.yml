@@ -46,7 +46,7 @@ services:
       - "--max-model-len"
       - "16384" # RAG 문맥을 위해 충분한 길이 확보
       - "--gpu-memory-utilization"
-      - "0.85"
+      - "0.8"
       - "--max-num-seqs"
       - "3"
       - "--quantization"
